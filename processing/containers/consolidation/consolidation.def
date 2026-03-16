@@ -1,0 +1,19 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    maintainer "annotation-pipeline"
+    description "Consolidation container for merging all genome annotations"
+    version "1.0"
+
+%post
+    pip install --no-cache-dir pandas
+
+%files
+    consolidate_all_annotations.py /usr/local/bin/consolidate_annotations
+
+%post
+    chmod +x /usr/local/bin/consolidate_annotations
+
+%runscript
+    exec python3 /usr/local/bin/consolidate_annotations "$@"

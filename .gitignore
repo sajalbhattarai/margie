@@ -1,0 +1,63 @@
+# ─── Built container artifacts (never commit these) ────────────────────────────
+*.sif
+*.img
+*.tar
+*.tar.gz
+apptainer_images/
+processing/containers/images/*.sif
+processing/containers/images/*.tar
+
+# ─── Database files (too large for git) ─────────────────────────────────────────
+db/cog/**
+db/dbcan/**
+db/eggnog/**
+db/interpro/**
+db/kegg/**
+db/merops/**
+db/pfam/**
+db/rasttk/**
+db/tcdb/**
+db/tigrfam/**
+db/uniprot/**
+!db/**/.gitkeep
+
+# ─── Input genomes ───────────────────────────────────────────────────────────────
+input/**
+!input/.gitkeep
+
+# ─── Output and logs ─────────────────────────────────────────────────────────────
+output/**
+!output/.gitkeep
+logs/**
+!logs/.gitkeep
+
+# ─── Processing intermediates ────────────────────────────────────────────────────
+processing/results/**
+processing/tmp/**
+!processing/**/.gitkeep
+
+# ─── Reference genomes ───────────────────────────────────────────────────────────
+reference_genomes/**
+!reference_genomes/.gitkeep
+
+# ─── macOS & editor junk ─────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ─── Python ──────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+venv/
+
+# ─── Backup files ────────────────────────────────────────────────────────────────
+*.bak
+*.backup
+*.orig

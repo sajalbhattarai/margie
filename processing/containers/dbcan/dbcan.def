@@ -1,0 +1,43 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    maintainer "Bioinformatics Pipeline"
+    description "dbCAN CAZyme annotation using HMMER 3.4"
+    version "1.0"
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+
+%post
+    apt-get update && apt-get install -y \
+        wget \
+        tar \
+        gzip \
+        make \
+        gcc \
+        g++ \
+        perl \
+        python3 \
+        python3-pip \
+        && rm -rf /var/lib/apt/lists/*
+    cd /tmp && \
+        wget http://eddylab.org/software/hmmer/hmmer-3.4.tar.gz && \
+        tar -xzf hmmer-3.4.tar.gz && \
+        cd hmmer-3.4 && \
+        ./configure && \
+        make -j$(nproc) && \
+        make install && \
+        cd / && \
+        rm -rf /tmp/hmmer-3.4*
+    mkdir -p /container/scripts /container/db /container/input /container/output
+
+%files
+    scripts/run_hmmscan.sh /container/scripts/run_hmmscan.sh
+    scripts/consolidate_dbcan.py /container/scripts/consolidate_dbcan.py
+
+%post
+    chmod +x /container/scripts/*.sh
+
+%runscript
+    exec /bin/bash "$@"

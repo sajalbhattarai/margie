@@ -1,0 +1,1863 @@
+#!/usr/bin/env bash
+# annotate-genome
+# Margie — Complete genome functional annotation pipeline wrapper.
+# Supports single-genome, batch, interactive, and SLURM submission modes.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# ── Default paths ─────────────────────────────────────────────────────────────
+DEFAULT_INPUT_DIR="$SCRIPT_DIR/input"
+DEFAULT_OUTPUT_DIR="$SCRIPT_DIR/output"
+LOG_DIR="$SCRIPT_DIR/logs"
+CONTAINERS_DIR="$SCRIPT_DIR/processing/containers"
+STATE_DIR="$SCRIPT_DIR/.margie_state"
+STATE_CONTAINERS_FILE="$STATE_DIR/containers.ready"
+STATE_DATABASES_FILE="$STATE_DIR/databases.ready"
+
+INPUT_DIR="$DEFAULT_INPUT_DIR"
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+# ── Pipeline parameters ───────────────────────────────────────────────────────
+INPUT_FASTA=""
+OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+DB_SELECTION="all"
+NODES=""
+TASKS=1
+THREADS=""
+USE_SLURM=0
+SLURM_ACCOUNT=""
+SLURM_PARTITION=""
+CONTAINER_RUNTIME=""
+PIPELINE_REDO=0
+DRY_RUN_PIPELINE=0
+NON_INTERACTIVE=0
+WANT_GUI=""
+_MODE=""
+
+# ── Tool catalogue ─────────────────────────────────────────────────────────────
+ALL_DB_TOOLS=(cog pfam tigrfam kegg dbcan eggnog merops tcdb uniprot interpro rasttk operon)
+ALL_PIPELINE_STEPS=(prodigal cog pfam tigrfam kegg dbcan eggnog merops tcdb uniprot interpro rasttk operon consolidation)
+GENE_CALLER_TOOLS=(prodigal rasttk)
+RUN_SELECTED_TOOLS=()
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  HELP
+# ════════════════════════════════════════════════════════════════════════════════
+show_usage() {
+    cat <<EOF
+${BOLD}Margie — Genome Functional Annotation Pipeline${NC}
+
+${BOLD}USAGE${NC}
+  ./annotate-genome [MODE] [OPTIONS]
+
+${BOLD}QUICK START${NC}
+  ./annotate-genome --interactive     Guided first-time setup + annotation wizard
+  ./annotate-genome --run             Auto-annotate everything in input/
+  ./annotate-genome -f genome.fna     Annotate one genome with all databases
+
+${BOLD}MODES${NC}
+  (no args)           Show this help
+  --interactive, -I   Guided setup and annotation wizard (recommended for new users)
+  --run               Process all genomes in the input folder automatically.
+                      New genomes are annotated immediately; partially-complete
+                      genomes are flagged and you are asked whether to continue.
+  --setup             First-time container and database setup only
+  --preflight         Check environment readiness AND pipeline readiness, then exit
+  --menu              Open the advanced interactive menu
+
+${BOLD}INPUT / OUTPUT${NC}
+    --input PATH, -input PATH
+                                            Generic input path. If PATH is a file it is treated as
+                                            --input-fasta; if PATH is a directory it is treated as
+                                            --input-dir.
+  --input-fasta FILE, -f FILE
+                      Path to a single genome FASTA (.fna/.fasta/.fa) or
+                      protein FASTA (.faa).  Protein FAA files skip gene calling.
+  --input-dir DIR, -i DIR
+                      Folder of genome FASTA files for batch annotation.
+                      (default: <repo>/input/)
+  --output-dir DIR, -o DIR
+                      Destination directory for annotation results.
+                      (default: <repo>/output/)
+
+${BOLD}ANNOTATION CONTROL${NC}
+  --database LIST, -d LIST
+                      Comma-separated list of databases to run, or "all".
+                      Available databases:
+                        cog        Clusters of Orthologous Groups
+                        pfam       Protein family HMM profiles (Pfam-A)
+                        tigrfam    TIGRFAM HMM profiles
+                        kegg       KEGG Orthology via KofamScan
+                        dbcan      Carbohydrate-Active enZymes (CAZy)
+                        eggnog     EggNOG orthology and COG annotation
+                        merops     MEROPS peptidase database
+                        tcdb       Transporter Classification Database
+                        uniprot    UniProt reference proteomes
+                        interpro   InterPro domain mapping
+                        rasttk     RAST-tk metabolic subsystems
+                        operon     Operon prediction via UniOP
+                      (default: all)
+  --redo              Re-annotate even genomes marked as complete.
+                      Overwrites existing results.
+
+${BOLD}COMPUTING RESOURCES${NC}
+  --nodes N, -N N     Total CPU cores available to the pipeline.
+                      (default: all cores via nproc)
+  --tasks N, -T N     Number of genomes to process in parallel.
+                      Cores are divided evenly across tasks.
+                      (default: 1)
+  --threads N, -t N   CPU threads handed to each annotation tool.
+                      (default: nodes ÷ tasks)
+
+  Resource note: --nodes, --tasks, and --threads apply both to local runs and
+  to SLURM submissions.  On SLURM --nodes maps to #SBATCH --cpus-per-task and
+  --tasks controls the parallel job-array width.
+
+${BOLD}HPC / SLURM${NC}
+  --slurm             Submit annotation as a SLURM batch job (sbatch)
+  --account NAME, -A NAME
+                      SLURM account to charge  (e.g. lindems)
+  --partition NAME, -P NAME
+                      SLURM partition name     (e.g. cpu, highmem, gpu)
+
+${BOLD}CONTAINER RUNTIME${NC}
+  --docker            Force Docker runtime
+  --apptainer         Force Apptainer / Singularity runtime
+  (auto-detected if neither is specified)
+
+${BOLD}SETUP FLAGS${NC}
+  --setup [--docker|--apptainer] [--db LIST] [--skip-db] [--dry-run]
+                      Build containers and download databases
+  --gui               Build the Margie GUI container (optional)
+  --cog --pfam --tigrfam --kegg --dbcan --eggnog --merops --tcdb
+  --uniprot --interpro --rasttk --operon --prodigal --consolidation
+                                            With --setup: build only the named tool container(s)
+                                            Without --setup: run the named tool(s) directly
+  --dry-run           Preview setup commands without executing
+
+${BOLD}EXAMPLES${NC}
+  # First-time guided setup and annotation
+  ./annotate-genome --interactive
+
+  # Annotate a single genome (all databases, auto-detect cores)
+  ./annotate-genome -f /path/to/genome.fna
+
+  # Annotate one genome with only COG + Pfam, 8 threads
+  ./annotate-genome -f genome.fna -d cog,pfam --threads 8
+
+  # Batch-annotate a folder (4 genomes at once, 8 threads each)
+  ./annotate-genome -i input/ --tasks 4 --threads 8
+
+  # Auto-annotate default input folder using 32 cores
+  ./annotate-genome --run --nodes 32
+
+  # Submit a genome to SLURM (24 cores)
+  ./annotate-genome -f genome.fna --slurm --account lindems \\
+      --partition highmem --nodes 24
+
+  # Build only the GUI container
+  ./annotate-genome --setup --gui
+
+    # Run only RASTtk on genomes from input/
+    ./annotate-genome --rasttk
+
+    # Run only COG on an existing protein FASTA
+    ./annotate-genome --cog -f proteins.faa
+
+  # Check full pipeline readiness
+  ./annotate-genome --preflight
+EOF
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  UTILITY HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+ncpus() { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4; }
+
+effective_nodes()   { if [[ -n "$NODES" ]]; then echo "$NODES"; else ncpus; fi; }
+effective_threads() {
+    if [[ -n "$THREADS" ]]; then
+        echo "$THREADS"
+    else
+        local n; n="$(effective_nodes)"
+        echo $(( n / TASKS > 0 ? n / TASKS : 1 ))
+    fi
+}
+
+run_preflight() { bash "$SCRIPT_DIR/setup_containers.sh" --preflight; }
+run_setup()     { bash "$SCRIPT_DIR/setup_containers.sh" "$@"; }
+
+setup_recorded_complete() {
+    [[ -f "$STATE_CONTAINERS_FILE" && -f "$STATE_DATABASES_FILE" ]]
+}
+
+record_setup_markers_from_readiness() {
+    mkdir -p "$STATE_DIR"
+    if [[ ! -f "$STATE_CONTAINERS_FILE" ]]; then
+        {
+            printf 'timestamp=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            printf 'source=annotate-genome-readiness\n'
+        } > "$STATE_CONTAINERS_FILE"
+    fi
+    if [[ ! -f "$STATE_DATABASES_FILE" ]]; then
+        {
+            printf 'timestamp=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            printf 'source=annotate-genome-readiness\n'
+        } > "$STATE_DATABASES_FILE"
+    fi
+}
+
+detect_os() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin) echo "macos" ;;
+        Linux)  echo "linux" ;;
+        *)      echo "other" ;;
+    esac
+}
+
+is_setup_flag() {
+    case "$1" in
+        --skip-db|--db|-all|all|--dry-run|--platform|--gui) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+append_selected_run_tool() {
+    local tool_name="$1"
+    local existing
+    for existing in "${RUN_SELECTED_TOOLS[@]-}"; do
+        [[ "$existing" == "$tool_name" ]] && return 0
+    done
+    RUN_SELECTED_TOOLS+=("$tool_name")
+}
+
+prompt_yes_no() {
+    local prompt="$1" default_ans="${2:-y}" ans
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        ans="$default_ans"
+    elif [[ "$default_ans" == "y" ]]; then
+        read -r -p "$prompt [Y/n]: " ans; ans="${ans:-y}"
+    else
+        read -r -p "$prompt [y/N]: " ans; ans="${ans:-n}"
+    fi
+    [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+print_install_guidance() {
+    local os_name; os_name="$(detect_os)"
+    echo ""
+    echo "  Environment setup guidance:"
+    if [[ "$os_name" == "macos" ]]; then
+        cat <<'EOF'
+  - Docker Desktop (required for local builds):
+      https://www.docker.com/products/docker-desktop/
+  - Python 3 is required for helper scripts.
+  - wget is optional; Python downloader is used as fallback.
+  - Apptainer/Singularity: not typically used on macOS; prefer Docker locally.
+    For HPC access, load via: module load apptainer
+EOF
+    elif [[ "$os_name" == "linux" ]]; then
+        cat <<'EOF'
+  - Docker (local / cloud workstations):
+      sudo apt update && sudo apt install -y docker.io
+      sudo usermod -aG docker $USER   # then log out and back in
+  - Apptainer (HPC clusters):
+      sudo apt install -y apptainer-tools
+      OR: module load apptainer  (on a cluster)
+  - Python 3:
+      sudo apt install -y python3
+  - Optional host tools (containers are used as fallback if missing):
+      sudo apt install -y wget hmmer diamond-aligner
+EOF
+    else
+        cat <<'EOF'
+  - Install Docker OR Apptainer/Singularity
+  - Python 3 is required
+  - Host tools (wget, hmmer, diamond) are optional
+EOF
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  PIPELINE READINESS CHECK
+#  Returns 0 if all core containers and at least the minimal DB set are present.
+# ════════════════════════════════════════════════════════════════════════════════
+CORE_CONTAINERS=(prodigal cog pfam kegg consolidation)
+MISSING_CONTAINERS=()
+MISSING_DBS=()
+
+check_container_ready() {
+    local tool="$1"
+    # Docker image present?
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        local img
+        case "$tool" in
+            dbcan)   img="haidyi/run_dbcan:latest" ;;
+            eggnog)  img="quay.io/biocontainers/eggnog-mapper:2.1.12--pyhdfd78af_0" ;;
+            gui)     img="margie-gui:1.0" ;;
+            *)       img="${tool}-annotation:1.0" ;;
+        esac
+        docker image inspect "$img" >/dev/null 2>&1 && return 0
+    fi
+    # Apptainer SIF present?
+    [[ -f "$CONTAINERS_DIR/$tool/${tool}.sif" ]] && return 0
+    return 1
+}
+
+check_db_ready() {
+    local tool="$1"
+    local db_dir="$SCRIPT_DIR/db/$tool"
+    local shared="${MARGIE_SHARED_DB_ROOT:-/depot/lindems/data/margie/db}"
+    [[ -d "$shared/$tool" ]] && db_dir="$shared/$tool"
+    [[ -d "$db_dir" ]] && find "$db_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+}
+
+pipeline_readiness_check() {
+    MISSING_CONTAINERS=()
+    MISSING_DBS=()
+    for tool in "${CORE_CONTAINERS[@]}"; do
+        check_container_ready "$tool" || MISSING_CONTAINERS+=("$tool")
+    done
+    for tool in cog pfam kegg; do
+        check_db_ready "$tool" || MISSING_DBS+=("$tool")
+    done
+    if [[ "${#MISSING_CONTAINERS[@]}" -eq 0 && "${#MISSING_DBS[@]}" -eq 0 ]]; then
+        setup_recorded_complete || record_setup_markers_from_readiness
+        return 0
+    fi
+    return 1
+}
+
+print_readiness_report() {
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Pipeline Readiness Report${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    local all_ok=1
+
+    echo ""
+    echo -e "  ${BOLD}Containers:${NC}"
+    for tool in "${ALL_PIPELINE_STEPS[@]}"; do
+        if check_container_ready "$tool"; then
+            echo -e "    ${GREEN}✔${NC}  $tool"
+        else
+            echo -e "    ${YELLOW}✘${NC}  $tool  ${DIM}(not built)${NC}"
+            all_ok=0
+        fi
+    done
+    if check_container_ready "gui"; then
+        echo -e "    ${GREEN}✔${NC}  gui"
+    else
+        echo -e "    ${DIM}○  gui  (optional — not built; run --setup --gui to build)${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Databases:${NC}"
+    for tool in "${ALL_DB_TOOLS[@]}"; do
+        if check_db_ready "$tool"; then
+            echo -e "    ${GREEN}✔${NC}  $tool"
+        else
+            echo -e "    ${YELLOW}✘${NC}  $tool  ${DIM}(not downloaded)${NC}"
+            all_ok=0
+        fi
+    done
+
+    echo ""
+    echo -e "  ${BOLD}Input directory:${NC}  $INPUT_DIR"
+    local genome_count
+    genome_count=$(find "$INPUT_DIR" -maxdepth 1 -type f \
+        \( -name '*.fna' -o -name '*.fasta' -o -name '*.fa' -o -name '*.faa' \) \
+        2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$genome_count" -gt 0 ]]; then
+        echo -e "    ${GREEN}✔${NC}  $genome_count genome file(s) ready"
+    else
+        echo -e "    ${YELLOW}○${NC}  No genome files found — add .fna/.fasta/.fa files to $INPUT_DIR"
+    fi
+
+    echo ""
+    if [[ "$all_ok" -eq 1 ]]; then
+        echo -e "${GREEN}${BOLD}  ✔  Pipeline is fully set up and ready to run!${NC}"
+        echo -e "     Run:  ${BOLD}./annotate-genome --run${NC}  to start annotation."
+    else
+        echo -e "${YELLOW}${BOLD}  !  Setup is incomplete — see items marked ✘ above.${NC}"
+        echo -e "     Run:  ${BOLD}./annotate-genome --setup${NC}  to complete missing items."
+    fi
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  INPUT FILE HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+show_input_status() {
+    echo ""
+    echo "  Input folder: $INPUT_DIR"
+    local count
+    count=$(find "$INPUT_DIR" -maxdepth 1 -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$count" -eq 0 ]]; then
+        echo "  No input files found."
+        echo "  Add .fna / .fasta / .fa genome files to: $INPUT_DIR"
+    else
+        echo "  Detected $count file(s):"
+        find "$INPUT_DIR" -maxdepth 1 -type f ! -name '.gitkeep' -exec basename {} \; | sort \
+            | while IFS= read -r f; do echo "    - $f"; done
+    fi
+}
+
+list_input_genomes() {
+    find "$INPUT_DIR" -maxdepth 1 -type f \
+        \( -name '*.fna' -o -name '*.fasta' -o -name '*.fa' -o -name '*.faa' \) \
+        2>/dev/null | sort
+}
+
+normalize_genome_name() {
+    basename "$1" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//'
+}
+
+is_gene_caller_tool() {
+    case "$1" in
+        prodigal|rasttk) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+resolve_runtime_for_tool() {
+    local tool="$1"
+    local image sif runtime_bin=""
+    case "$tool" in
+        dbcan) image="haidyi/run_dbcan:latest" ;;
+        eggnog) image="quay.io/biocontainers/eggnog-mapper:2.1.12--pyhdfd78af_0" ;;
+        *) image="${tool}-annotation:1.0" ;;
+    esac
+    sif="$CONTAINERS_DIR/$tool/${tool}.sif"
+
+    if [[ "$CONTAINER_RUNTIME" == "docker" ]]; then
+        docker image inspect "$image" >/dev/null 2>&1 && { echo "docker"; return 0; }
+        echo "none"; return 1
+    fi
+    if [[ "$CONTAINER_RUNTIME" == "apptainer" ]]; then
+        if command -v apptainer >/dev/null 2>&1 && [[ -f "$sif" ]]; then
+            echo "apptainer"; return 0
+        fi
+        if command -v singularity >/dev/null 2>&1 && [[ -f "$sif" ]]; then
+            echo "singularity"; return 0
+        fi
+        echo "none"; return 1
+    fi
+
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker image inspect "$image" >/dev/null 2>&1; then
+        echo "docker"; return 0
+    fi
+    if command -v apptainer >/dev/null 2>&1 && [[ -f "$sif" ]]; then
+        echo "apptainer"; return 0
+    fi
+    if command -v singularity >/dev/null 2>&1 && [[ -f "$sif" ]]; then
+        echo "singularity"; return 0
+    fi
+    echo "none"
+    return 1
+}
+
+db_dir_is_usable() {
+    local tool="$1" db_dir="$2"
+    [[ -d "$db_dir" ]] || return 1
+    case "$tool" in
+        rasttk)
+            [[ -f "$db_dir/subsystem_mapping.tsv" && -d "$db_dir/variant_definitions" ]]
+            ;;
+        kegg)
+            [[ -d "$db_dir/profiles" || -f "$db_dir/profiles.tar.gz" ]]
+            ;;
+        eggnog)
+            [[ -f "$db_dir/eggnog_proteins.dmnd" || -f "$db_dir/eggnog_proteins.dmnd.gz" ]]
+            ;;
+        tcdb)
+            [[ -f "$db_dir/tcdb_blast.pin" || -f "$db_dir/tcdb_blast.phr" || -f "$db_dir/tcdb.fasta" || -f "$db_dir/tcdb.fa" ]]
+            ;;
+        merops)
+            [[ -f "$db_dir/merops.dmnd" || -f "$db_dir/pepunit.lib" || -f "$db_dir/pepunit.txt" ]]
+            ;;
+        uniprot)
+            [[ -f "$db_dir/uniprot_sprot.fasta" || -f "$db_dir/uniprot_sprot.fasta.gz" ]]
+            ;;
+        *)
+            find "$db_dir" -mindepth 1 -maxdepth 2 -type f 2>/dev/null | head -1 | grep -q .
+            ;;
+    esac
+}
+
+resolve_db_dir() {
+    local tool="$1"
+    local shared="${MARGIE_SHARED_DB_ROOT:-/depot/lindems/data/margie/db}"
+    local local_db="$SCRIPT_DIR/db/$tool"
+    # Explicit per-tool override wins when provided.
+    local tool_upper
+    tool_upper="$(echo "$tool" | tr '[:lower:]' '[:upper:]')"
+    local explicit_var="MARGIE_${tool_upper}_DB_DIR"
+    local explicit_db="${!explicit_var:-}"
+    if [[ -n "$explicit_db" && -d "$explicit_db" ]]; then
+        echo "$explicit_db"
+        return 0
+    fi
+
+    # Backward-compatible override specifically for RASTtk SEED enrichment assets.
+    if [[ "$tool" == "rasttk" && -n "${MARGIE_RASTTK_DB_SOURCE:-}" && -d "${MARGIE_RASTTK_DB_SOURCE}" ]]; then
+        echo "${MARGIE_RASTTK_DB_SOURCE}"
+        return 0
+    fi
+
+    if db_dir_is_usable "$tool" "$local_db"; then
+        echo "$local_db"
+    elif db_dir_is_usable "$tool" "$shared/$tool"; then
+        echo "$shared/$tool"
+    else
+        echo "$local_db"
+    fi
+}
+
+ensure_tool_db_ready() {
+    local tool="$1" db_dir="$2"
+
+    case "$tool" in
+        kegg)
+            if [[ ! -d "$db_dir/profiles" && -f "$db_dir/profiles.tar.gz" ]]; then
+                tar -xzf "$db_dir/profiles.tar.gz" -C "$db_dir" 2>/dev/null || true
+            fi
+            if [[ ! -f "$db_dir/ko_list" && -f "$db_dir/ko_list.gz" ]]; then
+                gunzip -kf "$db_dir/ko_list.gz" 2>/dev/null || true
+            fi
+            ;;
+        tcdb)
+            if [[ ! -f "$db_dir/tcdb_blast.pin" && ! -f "$db_dir/tcdb_blast.phr" ]]; then
+                local tcdb_fasta=""
+                [[ -f "$db_dir/tcdb.fasta" ]] && tcdb_fasta="$db_dir/tcdb.fasta"
+                [[ -z "$tcdb_fasta" && -f "$db_dir/tcdb.fa" ]] && tcdb_fasta="$db_dir/tcdb.fa"
+                if [[ -n "$tcdb_fasta" && "$DRY_RUN_PIPELINE" -eq 0 ]] && command -v makeblastdb >/dev/null 2>&1; then
+                    echo "  [prep] Building TCDB BLAST index from $(basename "$tcdb_fasta")"
+                    makeblastdb -in "$tcdb_fasta" -dbtype prot -out "$db_dir/tcdb_blast" || true
+                fi
+            fi
+            ;;
+        merops)
+            if [[ ! -f "$db_dir/merops.dmnd" && -f "$db_dir/pepunit.lib" ]]; then
+                if [[ "$DRY_RUN_PIPELINE" -eq 0 ]] && command -v diamond >/dev/null 2>&1; then
+                    echo "  [prep] Building MEROPS DIAMOND index from pepunit.lib"
+                    diamond makedb --in "$db_dir/pepunit.lib" -d "$db_dir/merops" || true
+                fi
+            fi
+            ;;
+        uniprot)
+            if [[ ! -f "$db_dir/uniprot_sprot.fasta" && -f "$db_dir/uniprot_sprot.fasta.gz" ]]; then
+                gunzip -kf "$db_dir/uniprot_sprot.fasta.gz" 2>/dev/null || true
+            fi
+            ;;
+        eggnog)
+            if [[ ! -f "$db_dir/eggnog_proteins.dmnd" && -f "$db_dir/eggnog_proteins.dmnd.gz" ]]; then
+                gunzip -kf "$db_dir/eggnog_proteins.dmnd.gz" 2>/dev/null || true
+            fi
+            ;;
+    esac
+}
+
+resolve_effective_db_dir() {
+    local tool="$1" db_dir="$2"
+    case "$tool" in
+        eggnog)
+            if [[ -f "$db_dir/eggnog.db" && -f "$db_dir/eggnog_proteins.dmnd" ]]; then
+                echo "$db_dir"
+            elif [[ -f "$db_dir/eggnog/eggnog.db" && -f "$db_dir/eggnog/eggnog_proteins.dmnd" ]]; then
+                echo "$db_dir/eggnog"
+            else
+                echo "$db_dir"
+            fi
+            ;;
+        kegg)
+            if [[ -d "$db_dir/profiles" && -f "$db_dir/ko_list" ]]; then
+                echo "$db_dir"
+            elif [[ -d "$db_dir/kegg/profiles" && -f "$db_dir/kegg/ko_list" ]]; then
+                echo "$db_dir/kegg"
+            else
+                echo "$db_dir"
+            fi
+            ;;
+        uniprot)
+            if [[ -f "$db_dir/uniprot_sprot.fasta" ]]; then
+                echo "$db_dir"
+            elif [[ -f "$db_dir/uniprot/uniprot_sprot.fasta" ]]; then
+                echo "$db_dir/uniprot"
+            else
+                echo "$db_dir"
+            fi
+            ;;
+        tcdb)
+            if [[ -f "$db_dir/tcdb.fasta" || -f "$db_dir/tcdb.fa" || -f "$db_dir/tcdb_blast.pin" || -f "$db_dir/tcdb_blast.phr" ]]; then
+                echo "$db_dir"
+            elif [[ -f "$db_dir/tcdb/tcdb.fasta" || -f "$db_dir/tcdb/tcdb.fa" || -f "$db_dir/tcdb/tcdb_blast.pin" || -f "$db_dir/tcdb/tcdb_blast.phr" ]]; then
+                echo "$db_dir/tcdb"
+            else
+                echo "$db_dir"
+            fi
+            ;;
+        merops)
+            if [[ -f "$db_dir/merops.dmnd" || -f "$db_dir/pepunit.lib" || -f "$db_dir/pepunit.txt" ]]; then
+                echo "$db_dir"
+            elif [[ -f "$db_dir/merops/merops.dmnd" || -f "$db_dir/merops/pepunit.lib" || -f "$db_dir/merops/pepunit.txt" ]]; then
+                echo "$db_dir/merops"
+            else
+                echo "$db_dir"
+            fi
+            ;;
+        *)
+            echo "$db_dir"
+            ;;
+    esac
+}
+
+tool_docker_image() {
+    case "$1" in
+        dbcan) echo "haidyi/run_dbcan:latest" ;;
+        eggnog) echo "quay.io/biocontainers/eggnog-mapper:2.1.12--pyhdfd78af_0" ;;
+        *) echo "$1-annotation:1.0" ;;
+    esac
+}
+
+tool_docker_platform() {
+    case "$1" in
+        dbcan|eggnog|rasttk) echo "linux/amd64" ;;
+        *) echo "linux/amd64" ;;
+    esac
+}
+
+run_tool_container() {
+    local tool="$1"
+    local input_mount="$2"
+    local output_mount="$3"
+    local db_mount="${4:-}"
+    shift 4
+    local runtime image sif binds=()
+    runtime="$(resolve_runtime_for_tool "$tool")" || true
+    [[ "$runtime" == "none" ]] && {
+        echo -e "  ${RED}Container for $tool is not available. Run: ./annotate-genome --setup --$tool${NC}"
+        return 1
+    }
+
+    if [[ "$runtime" == "docker" ]]; then
+        image="$(tool_docker_image "$tool")"
+        local cmd=(docker run --rm --platform "$(tool_docker_platform "$tool")" -v "$input_mount" -v "$output_mount")
+        [[ -n "$db_mount" ]] && cmd+=(-v "$db_mount")
+        cmd+=("$image" "$@")
+        "${cmd[@]}"
+        return $?
+    fi
+
+    sif="$CONTAINERS_DIR/$tool/${tool}.sif"
+    binds=("$input_mount" "$output_mount")
+    [[ -n "$db_mount" ]] && binds+=("$db_mount")
+    # Bind the local scripts dir so tools work even if the SIF was built without them
+    local scripts_host="$CONTAINERS_DIR/$tool/scripts"
+    [[ -d "$scripts_host" ]] && binds+=("$scripts_host:/container/scripts:ro")
+    local bind_csv
+    bind_csv="$(IFS=,; echo "${binds[*]}")"
+    "$runtime" exec --bind "$bind_csv" "$sif" "$@"
+}
+
+update_gene_call_alias() {
+    local tool="$1" genome_name="$2"
+    local alias_root="$OUTPUT_DIR/$tool/gene_calls"
+    mkdir -p "$alias_root"
+    ln -sfn "../$genome_name/gene_calls" "$alias_root/$genome_name"
+}
+
+prompt_select_input_genomes() {
+    local search_dir="$1"
+    local -a genome_files=()
+    mapfile -t genome_files < <(find "$search_dir" -maxdepth 1 -type f \
+        \( -name '*.fna' -o -name '*.fasta' -o -name '*.fa' -o -name '*.faa' \) 2>/dev/null | sort)
+    [[ "${#genome_files[@]}" -eq 0 ]] && return 1
+
+    local idx=1 selection nums n
+    declare -A idx_to_file=()
+    echo "" >&2
+    echo -e "  ${BOLD}Available input genomes:${NC}" >&2
+    for f in "${genome_files[@]}"; do
+        echo "    $idx) $(basename "$f")" >&2
+        idx_to_file[$idx]="$f"
+        ((idx++))
+    done
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        selection="all"
+    else
+        read -r -p "  Select genomes (e.g. 1,3 or all) [default: all]: " selection
+        selection="${selection:-all}"
+    fi
+    if [[ "$selection" == "all" ]]; then
+        printf '%s\n' "${genome_files[@]}"
+        return 0
+    fi
+    IFS=',' read -ra nums <<< "$selection"
+    for n in "${nums[@]}"; do
+        n="${n//[[:space:]]/}"
+        [[ -n "${idx_to_file[$n]:-}" ]] && printf '%s\n' "${idx_to_file[$n]}"
+    done
+}
+
+discover_gene_call_candidates() {
+    local caller genome_dir genome_name gcdir faa gff
+    for caller in prodigal rasttk; do
+        [[ -d "$OUTPUT_DIR/$caller" ]] || continue
+        # Walk real organism subdirs directly; skip the 'gene_calls' alias dir
+        while IFS= read -r genome_dir; do
+            [[ -d "$genome_dir" ]] || continue
+            genome_name="$(basename "$genome_dir")"
+            [[ "$genome_name" == "gene_calls" ]] && continue
+            gcdir="$genome_dir/gene_calls"
+            if [[ -d "$gcdir" ]]; then
+                faa="$(find "$gcdir"  -maxdepth 1 -name '*.faa' 2>/dev/null | head -1)"
+                gff="$(find "$gcdir"  -maxdepth 1 -name '*.gff' 2>/dev/null | head -1)"
+            else
+                faa="$(find "$genome_dir" -maxdepth 1 -name '*.faa' 2>/dev/null | head -1)"
+                gff="$(find "$genome_dir" -maxdepth 1 -name '*.gff' 2>/dev/null | head -1)"
+            fi
+            [[ -n "$faa" ]] && printf '%s\t%s\t%s\t%s\n' "$caller" "$genome_name" "$faa" "$gff"
+        done < <(find "$OUTPUT_DIR/$caller" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    done
+}
+
+prompt_select_gene_calls() {
+    local -a records=()
+    mapfile -t records < <(discover_gene_call_candidates)
+    [[ "${#records[@]}" -eq 0 ]] && return 1
+
+    local idx=1 selection nums n caller genome faa gff
+    declare -A idx_to_record=()
+    echo "" >&2
+    echo -e "  ${BOLD}Available gene-call results:${NC}" >&2
+    for record in "${records[@]}"; do
+        IFS=$'\t' read -r caller genome faa gff <<< "$record"
+        echo "    $idx) $caller  ->  $genome" >&2
+        idx_to_record[$idx]="$record"
+        ((idx++))
+    done
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        selection="all"
+    else
+        read -r -p "  Select gene-call set(s) (e.g. 1,2 or all) [default: all]: " selection
+        selection="${selection:-all}"
+    fi
+    if [[ "$selection" == "all" ]]; then
+        printf '%s\n' "${records[@]}"
+        return 0
+    fi
+    IFS=',' read -ra nums <<< "$selection"
+    for n in "${nums[@]}"; do
+        n="${n//[[:space:]]/}"
+        [[ -n "${idx_to_record[$n]:-}" ]] && printf '%s\n' "${idx_to_record[$n]}"
+    done
+}
+
+run_gene_caller_direct() {
+    local tool="$1" genome_file="$2"
+    local genome_name tool_out protein_faa gff_file db_dir
+    genome_name="$(normalize_genome_name "$genome_file")"
+    case "$tool" in
+        prodigal)
+            tool_out="$OUTPUT_DIR/prodigal/$genome_name/gene_calls"
+            mkdir -p "$tool_out"
+            bash "$SCRIPT_DIR/processing/scripts/prodigal/run_prodigal.sh" \
+                --input "$genome_file" --output "$tool_out" --name "$genome_name"
+            update_gene_call_alias prodigal "$genome_name"
+            printf '%s\t%s\t%s\n' "$genome_name" "$tool_out/${genome_name}.faa" "$tool_out/${genome_name}.gff"
+            ;;
+        rasttk)
+            tool_out="$OUTPUT_DIR/rasttk/$genome_name"
+            db_dir="$(resolve_db_dir rasttk)"
+            mkdir -p "$tool_out"
+            run_tool_container rasttk \
+                "$(dirname "$genome_file"):/container/input:ro" \
+                "$tool_out:/container/output:rw" \
+                "$db_dir:/container/db:ro" \
+                bash /container/scripts/run_rasttk_incremental.sh \
+                "$genome_name" "/container/input/$(basename "$genome_file")" "/container/output" "Unknown organism" 11 "Bacteria"
+            update_gene_call_alias rasttk "$genome_name"
+            printf '%s\t%s\t%s\n' "$genome_name" "$tool_out/gene_calls/${genome_name}.faa" "$tool_out/gene_calls/${genome_name}.gff"
+            ;;
+    esac
+}
+
+run_annotation_tool_direct() {
+    local tool="$1" genome_name="$2" protein_faa="$3" gff_file="${4:-}"
+    local tool_out="$OUTPUT_DIR/$tool/$genome_name"
+    local input_dir db_dir dbcan_hmm_file
+    input_dir="$(dirname "$protein_faa")"
+    db_dir="$(resolve_db_dir "$tool")"
+    db_dir="$(resolve_effective_db_dir "$tool" "$db_dir")"
+    ensure_tool_db_ready "$tool" "$db_dir"
+    mkdir -p "$tool_out"
+
+    case "$tool" in
+        cog)
+            run_tool_container cog "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:rw" \
+                env INPUT_FAA="/container/input/$(basename "$protein_faa")" OUTPUT_DIR="/container/output" THREADS="$(effective_threads)" bash /container/scripts/run_cogclassifier.sh ;;
+        pfam)
+            run_tool_container pfam "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
+                bash /container/scripts/run_hmmscan.sh --input "/container/input/$(basename "$protein_faa")" --output "/container/output" --database "/container/db/Pfam-A.hmm" --threads "$(effective_threads)" ;;
+        tigrfam)
+            run_tool_container tigrfam "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
+                bash /container/scripts/run_hmmscan.sh --input "/container/input/$(basename "$protein_faa")" --output "/container/output" --database "/container/db/TIGRFAMs_15.0_HMM.LIB" --threads "$(effective_threads)" ;;
+        dbcan)
+            dbcan_hmm_file="/container/db/dbCAN-HMMdb-V14.txt"
+            [[ ! -f "$db_dir/dbCAN-HMMdb-V14.txt" && -f "$db_dir/dbCAN-HMMdb-V12.txt" ]] && dbcan_hmm_file="/container/db/dbCAN-HMMdb-V12.txt"
+            [[ ! -f "$db_dir/dbCAN-HMMdb-V14.txt" && ! -f "$db_dir/dbCAN-HMMdb-V12.txt" && -f "$db_dir/dbCAN.txt" ]] && dbcan_hmm_file="/container/db/dbCAN.txt"
+            run_tool_container dbcan "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
+                bash /container/scripts/run_hmmscan.sh --input "/container/input/$(basename "$protein_faa")" --output "/container/output" --database "$dbcan_hmm_file" --threads "$(effective_threads)" ;;
+        kegg)
+            run_tool_container kegg "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
+                bash /container/scripts/run_kofamscan.sh --input "/container/input/$(basename "$protein_faa")" --output "/container/output/kofamscan_output.txt" --threads "$(effective_threads)" ;;
+        eggnog)
+            run_tool_container eggnog "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
+                env INPUT_FAA="/container/input/$(basename "$protein_faa")" OUTPUT_DIR="/container/output" THREADS="$(effective_threads)" ORGANISM_NAME="$genome_name" bash /container/scripts/run_eggnog_mapper.sh ;;
+        merops)
+            run_tool_container merops "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:rw" \
+                bash /container/scripts/run_diamond.sh "$genome_name" "/container/input/$(basename "$protein_faa")" "/container/db/merops.dmnd" "/container/output" "$(effective_threads)" ;;
+        tcdb)
+            run_tool_container tcdb "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:rw" \
+                env INPUT_FAA="/container/input/$(basename "$protein_faa")" OUTPUT_DIR="/container/output" THREADS="$(effective_threads)" bash /container/scripts/run_blast.sh ;;
+        uniprot)
+            run_tool_container uniprot "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
+                bash /container/scripts/run_upimapi.sh "/container/input/$(basename "$protein_faa")" "/container/output/uniprot_hits.tsv" "/container/db/uniprot_sprot.fasta" "$(effective_threads)" ;;
+        interpro)
+            python3 "$CONTAINERS_DIR/interpro/scripts/run_interpro_mapping.py" \
+                --organism "$genome_name" \
+                --pfam "$OUTPUT_DIR/pfam/$genome_name/pfam.nonoverlap.domains" \
+                --tigrfam "$OUTPUT_DIR/tigrfam/$genome_name/tigrfam.domtblout" \
+                --mapping "$(resolve_db_dir interpro)/signature_to_ipr.tsv" \
+                --output "$tool_out/interpro.tsv" ;;
+        operon)
+            if [[ -z "$gff_file" || ! -f "$gff_file" ]]; then
+                echo -e "  ${YELLOW}[skip] operon requires a gene-caller GFF; none was selected for $genome_name${NC}"
+                return 0
+            fi
+            bash "$CONTAINERS_DIR/operon/scripts/predict_operons.sh" --gff "$gff_file" --output "$tool_out" ;;
+        *)
+            echo -e "  ${YELLOW}[skip] Direct tool mode is not implemented for '$tool'${NC}"
+            ;;
+    esac
+}
+
+run_selected_tools_mode() {
+    local -a gene_tools=() annotation_tools=()
+    local tool
+    for tool in "${RUN_SELECTED_TOOLS[@]}"; do
+        if is_gene_caller_tool "$tool"; then
+            gene_tools+=("$tool")
+        else
+            annotation_tools+=("$tool")
+        fi
+    done
+
+    if [[ "${#gene_tools[@]}" -gt 1 && "${#annotation_tools[@]}" -gt 0 ]]; then
+        echo -e "${RED}Select at most one gene caller when combining with annotation tools.${NC}"
+        return 1
+    fi
+
+    if [[ "${#gene_tools[@]}" -gt 0 ]]; then
+        local -a genome_files=()
+        if [[ -n "$INPUT_FASTA" ]]; then
+            genome_files=("$INPUT_FASTA")
+        else
+            mapfile -t genome_files < <(prompt_select_input_genomes "$INPUT_DIR")
+        fi
+        [[ "${#genome_files[@]}" -eq 0 ]] && { echo -e "${YELLOW}No input genomes selected.${NC}"; return 1; }
+
+        local gene_tool genome_name protein_faa gff_file
+        for genome_file in "${genome_files[@]}"; do
+            if [[ "$genome_file" == *.faa ]]; then
+                echo -e "${RED}Gene callers expect genome FASTA (.fna/.fa/.fasta), not protein FASTA: $genome_file${NC}"
+                continue
+            fi
+            for gene_tool in "${gene_tools[@]}"; do
+                IFS=$'\t' read -r genome_name protein_faa gff_file <<< "$(run_gene_caller_direct "$gene_tool" "$genome_file")"
+                for tool in "${annotation_tools[@]}"; do
+                    run_annotation_tool_direct "$tool" "$genome_name" "$protein_faa" "$gff_file"
+                done
+            done
+        done
+        return 0
+    fi
+
+    local -a selected_records=()
+    if [[ -n "$INPUT_FASTA" ]]; then
+        if [[ "$INPUT_FASTA" != *.faa ]]; then
+            echo -e "${YELLOW}Direct annotation tools expect protein FASTA input or an existing gene-call selection.${NC}"
+            mapfile -t selected_records < <(prompt_select_gene_calls)
+        else
+            local genome_name
+            genome_name="$(normalize_genome_name "$INPUT_FASTA")"
+            selected_records=("manual\t$genome_name\t$INPUT_FASTA\t")
+        fi
+    else
+        mapfile -t selected_records < <(prompt_select_gene_calls)
+    fi
+    [[ "${#selected_records[@]}" -eq 0 ]] && {
+        echo -e "${YELLOW}No gene-call outputs were selected. Run ./annotate-genome --prodigal or --rasttk first.${NC}"
+        return 1
+    }
+
+    local record caller genome_name protein_faa gff_file
+    for record in "${selected_records[@]}"; do
+        IFS=$'\t' read -r caller genome_name protein_faa gff_file <<< "$record"
+        for tool in "${annotation_tools[@]}"; do
+            run_annotation_tool_direct "$tool" "$genome_name" "$protein_faa" "$gff_file"
+        done
+    done
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  ANNOTATION STATUS PROBING
+# ════════════════════════════════════════════════════════════════════════════════
+genome_annotation_status() {
+    local name="$1"
+    local prodigal_dir="$OUTPUT_DIR/prodigal/$name/gene_calls"
+    local rasttk_dir="$OUTPUT_DIR/rasttk/$name/gene_calls"
+    local consolidation_file="$OUTPUT_DIR/consolidation/$name/consolidated_${name}.tsv"
+
+    # Specifically look for the consolidated output
+    if [[ -f "$consolidation_file" ]]; then
+        echo "complete"; return
+    fi
+
+    # Any per-tool TSV outputs = partial
+    local tool
+    for tool in "${ALL_DB_TOOLS[@]}"; do
+        if [[ -d "$OUTPUT_DIR/$tool/$name" ]] && \
+           find "$OUTPUT_DIR/$tool/$name" -name "*.tsv" -print -quit 2>/dev/null | grep -q .; then
+            echo "partial"; return
+        fi
+    done
+
+    # Prodigal FAA only = gene called
+    if [[ -d "$prodigal_dir" ]] && find "$prodigal_dir" -name "*.faa" -print -quit 2>/dev/null | grep -q .; then
+        echo "gene_called"; return
+    fi
+    if [[ -d "$rasttk_dir" ]] && find "$rasttk_dir" -name "*.faa" -print -quit 2>/dev/null | grep -q .; then
+        echo "gene_called"; return
+    fi
+
+    echo "none"
+}
+
+completed_tools_for() {
+    local name="$1"
+    [[ ! -d "$OUTPUT_DIR" ]] && return
+    for tool in "${ALL_DB_TOOLS[@]}"; do
+        if [[ -d "$OUTPUT_DIR/$tool/$name" ]] && \
+           find "$OUTPUT_DIR/$tool/$name" -name "*.tsv" -print -quit 2>/dev/null | grep -q .; then
+            echo "$tool"
+        fi
+    done
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  INTERACTIVE HELPERS
+# ════════════════════════════════════════════════════════════════════════════════
+choose_runtime() {
+    echo "" >&2
+    echo -e "  ${BOLD}Select container runtime:${NC}" >&2
+    echo "    1)  Auto-detect  (recommended)" >&2
+    echo "    2)  Docker" >&2
+    echo "    3)  Apptainer / Singularity  (HPC)" >&2
+    read -r -p "  Choice [1-3, default 1]: " runtime_choice
+    case "${runtime_choice:-1}" in
+        2) echo "--docker" ;;
+        3) echo "--apptainer" ;;
+        *) echo "" ;;
+    esac
+}
+
+choose_db_profile() {
+    echo "" >&2
+    echo -e "  ${BOLD}Select database profile:${NC}" >&2
+    echo "    1)  Minimal      (cog, pfam)" >&2
+    echo "    2)  Recommended  (all major tools — default)" >&2
+    echo "    3)  All databases" >&2
+    echo "    4)  Custom list" >&2
+    read -r -p "  Choice [1-4, default 2]: " db_choice
+    case "${db_choice:-2}" in
+        1) echo "--db cog,pfam" ;;
+        3) echo "" ;;
+        4)
+            read -r -p "  Enter comma-separated list (e.g. cog,pfam,tigrfam): " custom_dbs
+            [[ -n "${custom_dbs:-}" ]] && echo "--db $custom_dbs" || echo ""
+            ;;
+        *) echo "--db cog,pfam,tigrfam,kegg,eggnog,uniprot,tcdb,merops,dbcan,interpro,rasttk" ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  GUI
+# ════════════════════════════════════════════════════════════════════════════════
+gui_container_available() {
+    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && \
+        docker image inspect margie-gui:1.0 >/dev/null 2>&1 && return 0
+    [[ -f "$CONTAINERS_DIR/gui/gui.sif" ]] && return 0
+    return 1
+}
+
+launch_gui() {
+    echo ""
+    if gui_container_available; then
+        echo -e "  ${CYAN}Starting Margie GUI (containerised)...${NC}"
+        echo -e "  ${DIM}Open  http://localhost:8501  in your browser.${NC}"
+        if docker image inspect margie-gui:1.0 >/dev/null 2>&1; then
+            docker run --rm -it \
+                -p 8501:8501 \
+                -v "$SCRIPT_DIR:/margie:ro" \
+                -v "$SCRIPT_DIR/input:/margie/input:rw" \
+                -v "$SCRIPT_DIR/output:/margie/output:rw" \
+                margie-gui:1.0
+        elif [[ -f "$CONTAINERS_DIR/gui/gui.sif" ]]; then
+            local apptainer_bin
+            apptainer_bin="$(command -v apptainer 2>/dev/null || command -v singularity 2>/dev/null || true)"
+            if [[ -n "$apptainer_bin" ]]; then
+                "$apptainer_bin" exec \
+                    --bind "$SCRIPT_DIR:/margie" \
+                    "$CONTAINERS_DIR/gui/gui.sif" \
+                    streamlit run /margie/app/gui/streamlit_app.py --server.port 8501
+            else
+                echo -e "  ${RED}No container runtime found to run gui.sif.${NC}"
+            fi
+        fi
+        return 0
+    fi
+
+    # Fallback: host streamlit
+    if command -v streamlit >/dev/null 2>&1; then
+        echo -e "  ${CYAN}Starting Margie GUI (host Streamlit)...${NC}"
+        echo -e "  ${DIM}Open  http://localhost:8501  in your browser.${NC}"
+        exec streamlit run "$SCRIPT_DIR/app/gui/streamlit_app.py"
+    fi
+
+    echo -e "  ${YELLOW}GUI is not available.${NC}"
+    echo "  To set it up choose one of:"
+    echo "    1) Build the GUI container:  ./annotate-genome --setup --gui"
+    echo "    2) Install on host:          pip install -r requirements-gui.txt"
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  SLURM JOB GENERATION
+# ════════════════════════════════════════════════════════════════════════════════
+build_slurm_script() {
+    local genome_file="$1"
+    local genome_name
+    genome_name="$(basename "$genome_file" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+    local n_cpu; n_cpu="$(effective_nodes)"
+    local n_threads; n_threads="$(effective_threads)"
+    mkdir -p "$LOG_DIR"
+
+    local sbatch_hdr="#SBATCH --job-name=margie_${genome_name}
+#SBATCH --cpus-per-task=${n_cpu}
+#SBATCH --output=${LOG_DIR}/margie_${genome_name}_%j.log
+#SBATCH --error=${LOG_DIR}/margie_${genome_name}_%j.log"
+    [[ -n "$SLURM_ACCOUNT" ]]   && sbatch_hdr+="
+#SBATCH --account=${SLURM_ACCOUNT}"
+    [[ -n "$SLURM_PARTITION" ]] && sbatch_hdr+="
+#SBATCH --partition=${SLURM_PARTITION}"
+
+    local rt_flag=""; [[ -n "$CONTAINER_RUNTIME" ]] && rt_flag="--${CONTAINER_RUNTIME}"
+    local db_flag=""; [[ "$DB_SELECTION" != "all" ]] && db_flag="--database ${DB_SELECTION}"
+    local redo_flag=""; [[ "$PIPELINE_REDO" -eq 1 ]] && redo_flag="--redo"
+
+    cat <<SLURM
+#!/usr/bin/env bash
+${sbatch_hdr}
+# Margie SLURM annotation job — ${genome_name}
+# Cores: ${n_cpu} | Threads/tool: ${n_threads} | Tasks: ${TASKS} | DBs: ${DB_SELECTION}
+set -euo pipefail
+
+cd "${SCRIPT_DIR}"
+./annotate-genome \\
+    --input-fasta "${genome_file}" \\
+    --output-dir  "${OUTPUT_DIR}" \\
+    --nodes       ${n_cpu} \\
+    --threads     ${n_threads} \\
+    --tasks       ${TASKS} \\
+    ${db_flag} ${rt_flag} ${redo_flag}
+SLURM
+}
+
+submit_slurm() {
+    local genome_file="$1"
+    local genome_name
+    genome_name="$(basename "$genome_file" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+    local script_path="$LOG_DIR/margie_${genome_name}.sbatch"
+    mkdir -p "$LOG_DIR"
+    build_slurm_script "$genome_file" > "$script_path"
+    echo -e "  ${CYAN}Submitting SLURM job: ${genome_name}${NC}"
+    echo "    Script: $script_path"
+    if [[ "$DRY_RUN_PIPELINE" -eq 1 ]]; then
+        echo -e "    ${DIM}[dry-run] sbatch $script_path${NC}"
+    else
+        sbatch "$script_path"
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  SINGLE-GENOME ANNOTATION DISPATCH
+# ════════════════════════════════════════════════════════════════════════════════
+run_annotation_for_genome() {
+    local genome_file="$1"
+    local genome_name
+    genome_name="$(basename "$genome_file" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+    local prodigal_out="$OUTPUT_DIR/prodigal/$genome_name/gene_calls"
+    local consolidation_out="$OUTPUT_DIR/consolidation/$genome_name"
+    local n_threads; n_threads="$(effective_threads)"
+    local is_faa=0
+    [[ "$genome_file" == *.faa ]] && is_faa=1
+
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Annotating: ${genome_name}${NC}"
+    echo "  Output layout : $OUTPUT_DIR/<tool>/$genome_name"
+    echo "  Threads : $n_threads  per tool"
+    echo "  Databases: $DB_SELECTION"
+    [[ "$is_faa" -eq 1 ]] && echo "  Mode    : protein input (gene calling skipped)"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    mkdir -p "$prodigal_out" "$consolidation_out"
+
+    # ── Step 1: Gene calling ───────────────────────────────────────────────
+    local protein_faa
+    if [[ "$is_faa" -eq 1 ]]; then
+        protein_faa="$genome_file"
+    else
+        protein_faa="$prodigal_out/${genome_name}.faa"
+        if [[ -f "$protein_faa" && "$PIPELINE_REDO" -eq 0 ]]; then
+            echo -e "  ${DIM}[skip] Prodigal — gene-called proteins already exist${NC}"
+        else
+            echo -e "  ${CYAN}[run]  Prodigal — gene calling${NC}"
+            if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
+                bash "$SCRIPT_DIR/processing/scripts/prodigal/run_prodigal.sh" \
+                    --input  "$genome_file" \
+                    --output "$prodigal_out" \
+                    --name   "$genome_name"
+                update_gene_call_alias prodigal "$genome_name"
+            else
+                echo "    → run_prodigal.sh --input $genome_file --output $prodigal_out --name $genome_name"
+            fi
+        fi
+    fi
+
+    # ── Steps 2+: Annotation tools ────────────────────────────────────────
+    local db_list
+    if [[ "$DB_SELECTION" == "all" ]]; then
+        db_list="${ALL_DB_TOOLS[*]}"
+    else
+        db_list="${DB_SELECTION//,/ }"
+    fi
+
+    local gff_for_downstream=""
+    [[ -f "$prodigal_out/${genome_name}.gff" ]] && gff_for_downstream="$prodigal_out/${genome_name}.gff"
+
+    for tool in $db_list; do
+        local tool_out="$OUTPUT_DIR/$tool/$genome_name"
+        if [[ -d "$tool_out" ]] && \
+           find "$tool_out" -name "*.tsv" -print -quit 2>/dev/null | grep -q . && \
+           [[ "$PIPELINE_REDO" -eq 0 ]]; then
+            echo -e "  ${DIM}[skip] $tool — output already present${NC}"
+            continue
+        fi
+
+        echo -e "  ${CYAN}[run]  $tool${NC}"
+        mkdir -p "$tool_out"
+
+        if [[ "$DRY_RUN_PIPELINE" -eq 1 ]]; then
+            if [[ "$tool" == "rasttk" ]]; then
+                echo "    → run rasttk gene-caller for $genome_file -> $tool_out"
+            else
+                echo "    → dispatch $tool --input $protein_faa --output $tool_out --threads $n_threads"
+            fi
+            continue
+        fi
+
+        if [[ "$tool" == "rasttk" ]]; then
+            if [[ "$is_faa" -eq 1 ]]; then
+                echo -e "    ${YELLOW}[skip] rasttk requires genome FASTA input (.fna/.fa/.fasta).${NC}"
+                continue
+            fi
+            if ! run_gene_caller_direct rasttk "$genome_file" 2>&1 | tee -a "$tool_out/${tool}.log"; then
+                echo -e "    ${YELLOW}[warn] $tool exited with errors — check $tool_out/${tool}.log${NC}"
+            fi
+            continue
+        fi
+
+        if ! run_annotation_tool_direct "$tool" "$genome_name" "$protein_faa" "$gff_for_downstream" \
+            2>&1 | tee -a "$tool_out/${tool}.log"; then
+            echo -e "    ${YELLOW}[warn] $tool exited with errors — check $tool_out/${tool}.log${NC}"
+        fi
+    done
+
+    # ── Final: Consolidation ──────────────────────────────────────────────
+    echo -e "  ${CYAN}[run]  consolidation${NC}"
+    local consolidate_input_root="$consolidation_out/.input_root"
+
+    if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
+        rm -rf "$consolidate_input_root"
+        mkdir -p "$consolidate_input_root"
+
+        local tool
+        for tool in "${ALL_DB_TOOLS[@]}"; do
+            if [[ -d "$OUTPUT_DIR/$tool/$genome_name" ]]; then
+                ln -s "$OUTPUT_DIR/$tool/$genome_name" "$consolidate_input_root/$tool"
+            fi
+        done
+
+        python3 "$CONTAINERS_DIR/consolidation/consolidate_all_annotations.py" \
+            --input-root "$consolidate_input_root" \
+            --output     "$consolidation_out/consolidated_${genome_name}.tsv" \
+            2>&1 | tee -a "$consolidation_out/consolidation.log" \
+            || echo -e "    ${YELLOW}[warn] Consolidation step encountered errors.${NC}"
+
+        rm -rf "$consolidate_input_root"
+    else
+        echo "    → consolidate_all_annotations.py --input-root $consolidate_input_root --output $consolidation_out/consolidated_${genome_name}.tsv"
+    fi
+
+    echo ""
+    echo -e "  ${GREEN}✔  Done: ${genome_name}${NC}"
+    echo "     Results in: $OUTPUT_DIR/<tool>/$genome_name"
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  BATCH / AUTO-RUN
+# ════════════════════════════════════════════════════════════════════════════════
+run_auto() {
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}  Margie — Auto-Annotate Mode${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo "  Input dir : $INPUT_DIR"
+    echo "  Output dir: $OUTPUT_DIR"
+
+    mapfile -t genome_files < <(list_input_genomes)
+
+    if [[ "${#genome_files[@]}" -eq 0 ]]; then
+        echo ""
+        echo -e "  ${YELLOW}No genome files found in $INPUT_DIR${NC}"
+        echo "  Add .fna / .fasta / .fa / .faa files and re-run."
+        return 1
+    fi
+
+    echo "  Found ${#genome_files[@]} genome file(s)."
+
+    local queue_new=()
+    local queue_partial=()
+    local queue_complete=()
+    local queue_genecalled=()
+
+    for f in "${genome_files[@]}"; do
+        local name
+        name="$(basename "$f" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+        case "$(genome_annotation_status "$name")" in
+            none)        queue_new+=("$f") ;;
+            gene_called) queue_genecalled+=("$f") ;;
+            partial)     queue_partial+=("$f") ;;
+            complete)    queue_complete+=("$f") ;;
+        esac
+    done
+
+    echo ""
+    echo "  Annotation status summary:"
+    echo -e "    ${GREEN}✔ Complete          :${NC} ${#queue_complete[@]}"
+    echo -e "    ${CYAN}↻ Gene-called only  :${NC} ${#queue_genecalled[@]}  (proteins ready, not yet DB-annotated)"
+    echo -e "    ${YELLOW}⚠ Partial           :${NC} ${#queue_partial[@]}  (some tools done — needs continuation)"
+    echo -e "    ${BOLD}○ New               :${NC} ${#queue_new[@]}  (will be annotated automatically)"
+
+    local will_run=("${queue_new[@]+"${queue_new[@]}"}" "${queue_genecalled[@]+"${queue_genecalled[@]}"}")
+
+    # Partial: ask once
+    if [[ "${#queue_partial[@]}" -gt 0 ]]; then
+        echo ""
+        echo -e "  ${YELLOW}Partially-annotated genomes (completed tools shown):${NC}"
+        for f in "${queue_partial[@]}"; do
+            local name
+            name="$(basename "$f" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+            local done_tools
+            done_tools="$(completed_tools_for "$name" | paste -sd ',' - || echo 'none')"
+            echo -e "    ${BOLD}$(basename "$f")${NC}  — done: ${done_tools}"
+        done
+        echo ""
+        if prompt_yes_no "  Continue partial annotations from last completed step?" "y"; then
+            will_run+=("${queue_partial[@]}")
+        fi
+    fi
+
+    # Complete + redo
+    if [[ "${#queue_complete[@]}" -gt 0 && "$PIPELINE_REDO" -eq 0 ]]; then
+        echo ""
+        echo "  ${#queue_complete[@]} genome(s) fully annotated — skipping. (Use --redo to overwrite.)"
+    elif [[ "${#queue_complete[@]}" -gt 0 && "$PIPELINE_REDO" -eq 1 ]]; then
+        will_run+=("${queue_complete[@]}")
+        echo "  ${#queue_complete[@]} complete genome(s) will be re-annotated (--redo)."
+    fi
+
+    if [[ "${#will_run[@]}" -eq 0 ]]; then
+        echo ""
+        echo -e "  ${GREEN}All genomes are already complete. Nothing to do.${NC}"
+        echo "  Use --redo to force re-annotation."
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Will annotate ${#will_run[@]} genome(s):${NC}"
+    for f in "${will_run[@]}"; do echo "    - $(basename "$f")"; done
+    echo ""
+    if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+        echo -e "  ${DIM}Proceeding automatically (non-interactive mode).${NC}"
+    else
+        read -r -p "  Proceed? [Y/n]: " confirm
+        [[ "${confirm:-y}" =~ ^[Nn]$ ]] && { echo "  Aborted."; return 0; }
+    fi
+
+    if [[ "$USE_SLURM" -eq 1 ]]; then
+        for f in "${will_run[@]}"; do submit_slurm "$f"; done
+    elif [[ "$TASKS" -gt 1 ]]; then
+        local running=0
+        for f in "${will_run[@]}"; do
+            run_annotation_for_genome "$f" &
+            (( running++ ))
+            if [[ "$running" -ge "$TASKS" ]]; then
+                wait -n 2>/dev/null || wait; (( running-- ))
+            fi
+        done
+        wait
+    else
+        for f in "${will_run[@]}"; do run_annotation_for_genome "$f"; done
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}${BOLD}  Annotation run complete. Results in: $OUTPUT_DIR${NC}"
+    echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  INTERACTIVE WIZARD
+# ════════════════════════════════════════════════════════════════════════════════
+run_interactive() {
+    echo ""
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║        Margie — Interactive Setup & Annotation       ║${NC}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "  This wizard covers:"
+    echo "    1.  Environment preflight check"
+    echo "    2.  Pipeline readiness detection (skips setup if everything is ready)"
+    echo "    3.  Container and database setup (only if needed)"
+    echo "    4.  Input file selection and annotation status review"
+    echo "    5.  Annotation options and execution"
+    echo ""
+
+    # ── 1: Preflight ───────────────────────────────────────────────────────
+    echo -e "${BOLD}━━  Step 1 / 6 — Environment Check  ━━━━━━━━━━━━━━━━━━━━${NC}"
+    if run_preflight; then
+        echo ""
+        echo -e "  ${GREEN}✔  Environment preflight passed.${NC}"
+    else
+        echo ""
+        echo -e "  ${YELLOW}!  Preflight reported problems.${NC}"
+        print_install_guidance
+        if ! prompt_yes_no "  Continue anyway?" "n"; then
+            return 1
+        fi
+    fi
+
+    # ── 2: Pipeline readiness ──────────────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}━━  Step 2 / 6 — Pipeline Readiness  ━━━━━━━━━━━━━━━━━━${NC}"
+    pipeline_readiness_check
+    local ready_rc=$?
+    print_readiness_report
+
+    local skip_setup=0
+    if [[ "$ready_rc" -eq 0 ]]; then
+        echo ""
+        echo -e "  ${GREEN}Pipeline is fully set up — skipping setup steps.${NC}"
+        skip_setup=1
+    elif setup_recorded_complete; then
+        echo ""
+        echo -e "  ${GREEN}Setup completion markers found — skipping setup steps.${NC}"
+        echo -e "  ${DIM}Markers: $STATE_CONTAINERS_FILE, $STATE_DATABASES_FILE${NC}"
+        skip_setup=1
+    fi
+
+    # ── 3: Setup (only if needed) ──────────────────────────────────────────
+    if [[ "$skip_setup" -eq 0 ]]; then
+        echo ""
+        echo -e "${BOLD}━━  Step 3 / 6 — Setup  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "  Some containers or databases are missing."
+
+        if prompt_yes_no "  Run setup to install missing items?" "y"; then
+            local runtime_flag db_flags
+            runtime_flag="$(choose_runtime)"
+            db_flags="$(choose_db_profile)"
+
+            # GUI choice
+            echo ""
+            echo -e "  ${BOLD}GUI container (optional):${NC}"
+            echo "  The GUI lets you upload genomes, monitor progress, and explore"
+            echo "  annotation results in a browser-based interface."
+            if prompt_yes_no "  Build the GUI container?" "n"; then
+                WANT_GUI="y"
+            else
+                WANT_GUI="n"
+                echo "  GUI skipped.  Build later with:  ./annotate-genome --setup --gui"
+            fi
+
+            # Dry-run preview
+            local preview_cmd=("$SCRIPT_DIR/setup_containers.sh")
+            [[ -n "$runtime_flag" ]] && preview_cmd+=("$runtime_flag")
+            [[ -n "$db_flags" ]]     && preview_cmd+=($db_flags)
+            [[ "$WANT_GUI" == "y" ]] && preview_cmd+=("--gui")
+            preview_cmd+=("--dry-run")
+            echo ""
+            echo "  Preview command: ${preview_cmd[*]}"
+            "${preview_cmd[@]}" || true
+
+            if prompt_yes_no "  Execute setup now?" "y"; then
+                local setup_cmd=("$SCRIPT_DIR/setup_containers.sh")
+                [[ -n "$runtime_flag" ]] && setup_cmd+=("$runtime_flag")
+                [[ -n "$db_flags" ]]     && setup_cmd+=($db_flags)
+                [[ "$WANT_GUI" == "y" ]] && setup_cmd+=("--gui")
+                "${setup_cmd[@]}"
+            fi
+
+            echo ""
+            echo "  Database setup is handled inside setup_containers.sh; skipping extra database pass."
+
+            echo ""
+            echo -e "${BOLD}  Re-checking readiness after setup...${NC}"
+            pipeline_readiness_check || true
+            print_readiness_report
+        else
+            echo "  Setup skipped — continuing to input selection."
+        fi
+    else
+        # Step 3 skipped — increment counter for display
+        echo ""
+        echo -e "${BOLD}━━  Step 3 / 6 — Setup  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${DIM}[skipped — pipeline already set up]${NC}"
+    fi
+
+    # ── 4: Input selection ─────────────────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}━━  Step 4 / 6 — Input Selection  ━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "  Default input folder: $INPUT_DIR"
+    show_input_status
+    echo ""
+    echo "    1)  Use default input folder  ($INPUT_DIR)"
+    echo "    2)  Specify a different folder"
+    echo "    3)  Specify a single genome file"
+    read -r -p "  Choice [1-3, default 1]: " input_choice
+
+    local selected_files=()
+    case "${input_choice:-1}" in
+        2)
+            read -r -p "  Folder path: " custom_dir
+            custom_dir="${custom_dir/#\~/$HOME}"
+            if [[ -d "$custom_dir" ]]; then
+                INPUT_DIR="$custom_dir"
+                echo "  Using: $INPUT_DIR"
+            else
+                echo -e "  ${RED}Folder not found — using default.${NC}"
+            fi
+            mapfile -t selected_files < <(list_input_genomes)
+            ;;
+        3)
+            read -r -p "  Genome file path: " single_file
+            single_file="${single_file/#\~/$HOME}"
+            if [[ -f "$single_file" ]]; then
+                selected_files=("$single_file")
+            else
+                echo -e "  ${RED}File not found: $single_file${NC}"
+                return 1
+            fi
+            ;;
+        *)
+            mapfile -t selected_files < <(list_input_genomes)
+            ;;
+    esac
+
+    if [[ "${#selected_files[@]}" -eq 0 ]]; then
+        echo ""
+        echo -e "  ${YELLOW}No genome files found.${NC}"
+        echo "  Add .fna/.fasta/.fa files to $INPUT_DIR and re-run."
+        return 0
+    fi
+
+    # Display all genomes with annotation status
+    echo ""
+    echo -e "  ${BOLD}Genomes found:${NC}"
+    local idx=1
+    declare -A file_index
+    for f in "${selected_files[@]}"; do
+        local name
+        name="$(basename "$f" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+        local st; st="$(genome_annotation_status "$name")"
+        local icon
+        case "$st" in
+            complete)    icon="${GREEN}✔ complete${NC}" ;;
+            partial)     icon="${YELLOW}⚠ partial${NC}" ;;
+            gene_called) icon="${CYAN}↻ gene-called (DB annotation pending)${NC}" ;;
+            *)           icon="${BOLD}○ not annotated${NC}" ;;
+        esac
+        echo -e "    $idx)  $(basename "$f")  — $icon"
+        file_index[$idx]="$f"
+        (( idx++ ))
+    done
+
+    echo ""
+    read -r -p "  Select genomes to annotate (e.g. 1,3,4 or 'all') [default: all]: " genome_sel
+    genome_sel="${genome_sel:-all}"
+
+    local to_annotate=()
+    if [[ "$genome_sel" == "all" ]]; then
+        to_annotate=("${selected_files[@]}")
+    else
+        IFS=',' read -ra nums <<< "$genome_sel"
+        for n in "${nums[@]}"; do
+            n="${n//[[:space:]]/}"
+            [[ -n "${file_index[$n]:-}" ]] && to_annotate+=("${file_index[$n]}")
+        done
+    fi
+
+    [[ "${#to_annotate[@]}" -eq 0 ]] && { echo "  No valid genomes selected."; return 0; }
+
+    # ── 5: Review selection with status ───────────────────────────────────
+    echo ""
+    echo -e "${BOLD}━━  Step 5 / 6 — Review Selection  ━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${BOLD}Selected:${NC}"
+
+    local q_new=() q_gc=() q_partial=() q_complete=()
+    for f in "${to_annotate[@]}"; do
+        local name
+        name="$(basename "$f" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+        local st; st="$(genome_annotation_status "$name")"
+        echo "    - $(basename "$f")  [$st]"
+        case "$st" in
+            none)        q_new+=("$f") ;;
+            gene_called) q_gc+=("$f") ;;
+            partial)     q_partial+=("$f") ;;
+            complete)    q_complete+=("$f") ;;
+        esac
+    done
+
+    local will_run_i=("${q_new[@]+"${q_new[@]}"}" "${q_gc[@]+"${q_gc[@]}"}")
+
+    if [[ "${#q_partial[@]}" -gt 0 ]]; then
+        echo ""
+        echo -e "  ${YELLOW}Partial genomes — completed tools:${NC}"
+        for f in "${q_partial[@]}"; do
+            local name
+            name="$(basename "$f" | sed 's/\.\(fna\|fasta\|fa\|faa\)$//')"
+            local done_t
+            done_t="$(completed_tools_for "$name" | paste -sd ',' - || echo 'none')"
+            echo "    - $name  [done: $done_t]"
+        done
+        prompt_yes_no "  Continue partial annotations from last completed step?" "y" \
+            && will_run_i+=("${q_partial[@]}")
+    fi
+
+    if [[ "${#q_complete[@]}" -gt 0 ]]; then
+        echo ""
+        echo -e "  ${GREEN}Already complete:${NC}"
+        for f in "${q_complete[@]}"; do echo "    - $(basename "$f")"; done
+        if prompt_yes_no "  Re-annotate already-complete genomes?" "n"; then
+            will_run_i+=("${q_complete[@]}")
+            PIPELINE_REDO=1
+        fi
+    fi
+
+    [[ "${#will_run_i[@]}" -eq 0 ]] && {
+        echo ""; echo -e "  ${GREEN}Nothing new to annotate.${NC}"; return 0
+    }
+
+    # ── 6: Resource settings and launch ───────────────────────────────────
+    echo ""
+    echo -e "${BOLD}━━  Step 6 / 6 — Annotation Settings  ━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    local avail_cpus; avail_cpus="$(ncpus)"
+    echo "  Available CPUs detected: $avail_cpus"
+    read -r -p "  Cores to use         [default: $avail_cpus]: " user_nodes
+    NODES="${user_nodes:-$avail_cpus}"
+
+    read -r -p "  Parallel genomes (tasks) [default: 1]: " user_tasks
+    TASKS="${user_tasks:-1}"
+
+    local auto_threads=$(( NODES / TASKS > 0 ? NODES / TASKS : 1 ))
+    read -r -p "  Threads per tool     [default: $auto_threads]: " user_threads
+    THREADS="${user_threads:-$auto_threads}"
+
+    read -r -p "  Databases            [default: all]: " user_dbs
+    DB_SELECTION="${user_dbs:-all}"
+
+    if command -v sbatch >/dev/null 2>&1; then
+        if prompt_yes_no "  Submit via SLURM?" "n"; then
+            USE_SLURM=1
+            read -r -p "  SLURM account        [leave blank to skip]: " SLURM_ACCOUNT
+            read -r -p "  SLURM partition      [leave blank to skip]: " SLURM_PARTITION
+        fi
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Run summary:${NC}"
+    printf "    %-20s %s\n" "Genomes:"     "${#will_run_i[@]}"
+    printf "    %-20s %s\n" "Output dir:"  "$OUTPUT_DIR"
+    printf "    %-20s %s\n" "Cores/nodes:" "$NODES"
+    printf "    %-20s %s\n" "Tasks:"       "$TASKS"
+    printf "    %-20s %s\n" "Threads:"     "$THREADS"
+    printf "    %-20s %s\n" "Databases:"   "$DB_SELECTION"
+    [[ "$USE_SLURM" -eq 1 ]] && printf "    %-20s %s\n" "SLURM account:" "${SLURM_ACCOUNT:-<none>}"
+    [[ "$USE_SLURM" -eq 1 ]] && printf "    %-20s %s\n" "SLURM partition:" "${SLURM_PARTITION:-<none>}"
+    echo ""
+
+    prompt_yes_no "  Start annotation?" "y" || { echo "  Aborted."; return 0; }
+
+    if [[ "$USE_SLURM" -eq 1 ]]; then
+        for f in "${will_run_i[@]}"; do submit_slurm "$f"; done
+    elif [[ "$TASKS" -gt 1 ]]; then
+        local running=0
+        for f in "${will_run_i[@]}"; do
+            run_annotation_for_genome "$f" &
+            (( running++ ))
+            if [[ "$running" -ge "$TASKS" ]]; then
+                wait -n 2>/dev/null || wait; (( running-- ))
+            fi
+        done
+        wait
+    else
+        for f in "${will_run_i[@]}"; do run_annotation_for_genome "$f"; done
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}  ✔  Annotation complete!${NC}"
+    echo "     Results in: $OUTPUT_DIR"
+    echo ""
+
+    if [[ "$WANT_GUI" == "y" ]] || gui_container_available || command -v streamlit >/dev/null 2>&1; then
+        prompt_yes_no "  Launch GUI to explore results?" "n" && launch_gui
+    else
+        echo "  Tip — to explore results in a browser-based interface:"
+        echo "    ./annotate-genome --setup --gui   # build the GUI container"
+        echo "    ./annotate-genome --menu          # then choose 'Launch GUI'"
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  ADVANCED MENU
+# ════════════════════════════════════════════════════════════════════════════════
+interactive_menu() {
+    while true; do
+        echo ""
+        echo -e "${BOLD}╔══════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}║       Margie — Advanced Interactive Menu         ║${NC}"
+        echo -e "${BOLD}╚══════════════════════════════════════════════════╝${NC}"
+        echo "   1)  Preflight check"
+        echo "   2)  Pipeline readiness report"
+        echo "   3)  Preview setup (dry-run)"
+        echo "   4)  Run full container + database setup"
+        echo "   5)  Run database-only setup"
+        echo "   6)  Build GUI container"
+        echo "   7)  Show input folder status"
+        echo "   8)  Annotate a single genome file"
+        echo "   9)  Batch-annotate input folder (auto mode)"
+        echo "  10)  Launch GUI"
+        echo "   q)  Quit"
+        echo ""
+        read -r -p "  Select [1-10, q]: " choice
+
+        case "$choice" in
+            1)  run_preflight || true ;;
+            2)  pipeline_readiness_check || true; print_readiness_report ;;
+            3)  run_setup --dry-run || true ;;
+            4)  run_setup; pipeline_readiness_check || true; print_readiness_report ;;
+            5)
+                read -r -p "  DB list (e.g. cog,pfam) or 'all' [default: all]: " dbs
+                if [[ "${dbs:-all}" == "all" ]]; then
+                    bash "$SCRIPT_DIR/setup_databases.sh"
+                else
+                    bash "$SCRIPT_DIR/setup_databases.sh" --db "$dbs"
+                fi
+                ;;
+            6)  bash "$SCRIPT_DIR/setup_containers.sh" --gui ;;
+            7)  show_input_status ;;
+            8)
+                read -r -p "  Path to genome file: " single_f
+                single_f="${single_f/#\~/$HOME}"
+                if [[ -f "$single_f" ]]; then
+                    run_annotation_for_genome "$single_f"
+                else
+                    echo -e "  ${RED}File not found: $single_f${NC}"
+                fi
+                ;;
+            9)  run_auto ;;
+           10)  launch_gui ;;
+            q|Q) echo "  Exiting."; break ;;
+            *)   echo "  Invalid option." ;;
+        esac
+    done
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  ARGUMENT PARSING
+# ════════════════════════════════════════════════════════════════════════════════
+if [[ $# -eq 0 ]]; then
+    show_usage
+    exit 0
+fi
+
+SETUP_PASSTHROUGH=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --interactive|-I) _MODE="interactive"; shift ;;
+        --run)            _MODE="run";         shift ;;
+        --tool-run)       _MODE="tool-run";    shift ;;
+        --menu)           _MODE="menu";        shift ;;
+        --preflight)      _MODE="preflight";   shift ;;
+        --setup)          _MODE="setup";       shift ;;
+
+        --input|-input)
+            if [[ -d "$2" ]]; then
+                INPUT_DIR="$2"
+            else
+                INPUT_FASTA="$2"
+            fi
+            shift 2 ;;
+        --input-fasta|-f)  INPUT_FASTA="$2"; shift 2 ;;
+        --input-dir|-i)    INPUT_DIR="$2";   shift 2 ;;
+        --output-dir|-o)   OUTPUT_DIR="$2";  shift 2 ;;
+        --database|-d)     DB_SELECTION="$2"; shift 2 ;;
+        --nodes|-N)        NODES="$2";    shift 2 ;;
+        --tasks|-T)        TASKS="$2";    shift 2 ;;
+        --threads|-t)      THREADS="$2";  shift 2 ;;
+        --slurm)           USE_SLURM=1;   shift ;;
+        --account|-A)      SLURM_ACCOUNT="$2";   shift 2 ;;
+        --partition|-P)    SLURM_PARTITION="$2"; shift 2 ;;
+        --docker)          CONTAINER_RUNTIME="docker";    SETUP_PASSTHROUGH+=("--docker");    shift ;;
+        --apptainer)       CONTAINER_RUNTIME="apptainer"; SETUP_PASSTHROUGH+=("--apptainer"); shift ;;
+        --redo)            PIPELINE_REDO=1;      shift ;;
+        --dry-run)         DRY_RUN_PIPELINE=1;   shift ;;
+        -h|--help)         show_usage; exit 0 ;;
+
+        # Setup-only flags
+        --gui|--skip-db)
+            SETUP_PASSTHROUGH+=("$1")
+            [[ -z "$_MODE" ]] && _MODE="setup"
+            shift ;;
+        # --all: full pipeline non-interactive run; --setup --all still passes through to setup_containers
+        --all)
+            if [[ "${_MODE:-}" == "setup" ]]; then
+                SETUP_PASSTHROUGH+=("$1")
+            else
+                NON_INTERACTIVE=1
+                [[ -z "${_MODE:-}" ]] && _MODE="run"
+            fi
+            shift ;;
+        --yes|-y)
+            NON_INTERACTIVE=1
+            shift ;;
+        # Tool flags: run directly unless --setup mode is active
+        --cog)            append_selected_run_tool "cog"; shift ;;
+        --pfam)           append_selected_run_tool "pfam"; shift ;;
+        --tigrfam)        append_selected_run_tool "tigrfam"; shift ;;
+        --dbcan)          append_selected_run_tool "dbcan"; shift ;;
+        --kegg)           append_selected_run_tool "kegg"; shift ;;
+        --eggnog)         append_selected_run_tool "eggnog"; shift ;;
+        --merops)         append_selected_run_tool "merops"; shift ;;
+        --tcdb)           append_selected_run_tool "tcdb"; shift ;;
+        --uniprot)        append_selected_run_tool "uniprot"; shift ;;
+        --interpro)       append_selected_run_tool "interpro"; shift ;;
+        --rasttk)         append_selected_run_tool "rasttk"; shift ;;
+        --prodigal)       append_selected_run_tool "prodigal"; shift ;;
+        --operon)         append_selected_run_tool "operon"; shift ;;
+        --consolidation)  append_selected_run_tool "consolidation"; shift ;;
+        --db)
+            if [[ "${_MODE:-}" == "setup" ]]; then
+                SETUP_PASSTHROUGH+=("$1" "$2")
+            else
+                DB_SELECTION="$2"
+            fi
+            shift 2 ;;
+        --platform)
+            SETUP_PASSTHROUGH+=("$1" "$2")
+            [[ -z "$_MODE" ]] && _MODE="setup"
+            shift 2 ;;
+
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "${_MODE:-}" == "setup" && "${#RUN_SELECTED_TOOLS[@]}" -gt 0 ]]; then
+    for tool in "${RUN_SELECTED_TOOLS[@]}"; do
+        SETUP_PASSTHROUGH+=("--$tool")
+    done
+    RUN_SELECTED_TOOLS=()
+fi
+
+if [[ -z "${_MODE:-}" ]]; then
+    if [[ "${#RUN_SELECTED_TOOLS[@]}" -gt 0 ]]; then
+        _MODE="tool-run"
+    elif [[ "${#SETUP_PASSTHROUGH[@]}" -gt 0 ]] && is_setup_flag "${SETUP_PASSTHROUGH[0]}"; then
+        _MODE="setup"
+    else
+        _MODE="run"
+    fi
+fi
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+case "$_MODE" in
+    interactive)
+        run_interactive
+        ;;
+    run)
+        if [[ -n "$INPUT_FASTA" ]]; then
+            if [[ "$USE_SLURM" -eq 1 ]]; then
+                submit_slurm "$INPUT_FASTA"
+            else
+                run_annotation_for_genome "$INPUT_FASTA"
+            fi
+        else
+            run_auto
+        fi
+        ;;
+    preflight)
+        run_preflight
+        echo ""
+        pipeline_readiness_check || true
+        print_readiness_report
+        ;;
+    setup)
+        run_setup "${SETUP_PASSTHROUGH[@]+"${SETUP_PASSTHROUGH[@]}"}"
+        show_input_status
+        ;;
+    tool-run)
+        run_selected_tools_mode
+        ;;
+    menu)
+        interactive_menu
+        ;;
+esac

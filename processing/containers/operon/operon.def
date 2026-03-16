@@ -1,0 +1,32 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    maintainer "Margie Annotation Pipeline"
+    description "Operon prediction container based on UniOP source build"
+    version "1.0"
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+    export UNIOP_HOME=/opt/UniOP
+
+%files
+    scripts/ /container/scripts/
+
+%post
+    apt-get update && apt-get install -y \
+        bash \
+        ca-certificates \
+        git \
+        libgomp1 \
+        prodigal \
+        && rm -rf /var/lib/apt/lists/*
+    git clone --depth 1 https://github.com/hongsua/UniOP.git /opt/UniOP
+    python -m pip install --no-cache-dir numpy pandas scikit-learn
+    printf '#!/usr/bin/env bash\nexec python3 /opt/UniOP/src/UniOP "$@"\n' > /usr/local/bin/UniOP
+    chmod +x /usr/local/bin/UniOP
+    mkdir -p /container/scripts /container/input /container/output
+    chmod +x /container/scripts/*.sh || true
+
+%runscript
+    exec /bin/bash "$@"

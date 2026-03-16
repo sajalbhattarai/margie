@@ -1,0 +1,63 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    Maintainer   Margie Pipeline
+    Description  Streamlit GUI for the Margie genome annotation pipeline
+    Version      1.0
+
+%environment
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUNBUFFERED=1
+    export STREAMLIT_SERVER_PORT=8501
+    export STREAMLIT_SERVER_HEADLESS=true
+    export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    export STREAMLIT_SERVER_ENABLE_CORS=false
+    export STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false
+    export APP_PATH=/margie/app/gui/streamlit_app.py
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir \
+        "streamlit>=1.33.0" \
+        "pandas>=2.0.0" \
+        "altair>=5.0.0" \
+        "watchdog"
+
+    # Placeholder mount points for bind paths
+    mkdir -p /margie/app/gui /margie/input /margie/output /margie/db
+
+%runscript
+    APP_PATH="${APP_PATH:-/margie/app/gui/streamlit_app.py}"
+    PORT="${STREAMLIT_SERVER_PORT:-8501}"
+
+    if [ ! -f "$APP_PATH" ]; then
+        echo "ERROR: Streamlit app not found at $APP_PATH"
+        echo "Mount the Margie repo: apptainer exec --bind /path/to/margie:/margie gui.sif"
+        exit 1
+    fi
+
+    echo "Starting Margie GUI on port $PORT"
+    echo "Open http://localhost:${PORT} in your browser"
+    exec streamlit run "$APP_PATH" \
+        --server.port "$PORT" \
+        --server.headless true \
+        --browser.gatherUsageStats false
+
+%help
+    Margie GUI — Streamlit-based browser interface for the Margie annotation pipeline.
+
+    To run, bind-mount the Margie repository directory:
+
+        apptainer exec --bind /path/to/margie:/margie gui.sif
+
+    Then open http://localhost:8501 in your browser.
+
+    The container expects:
+        /margie/app/gui/streamlit_app.py   (Streamlit application)
+        /margie/input/                     (writable input directory)
+        /margie/output/                    (writable output directory)

@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    maintainer "Context-Based Annotation Pipeline"
+    description "Prodigal gene-calling container"
+    version "1.0"
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+    export APT_LISTCHANGES_FRONTEND=none
+
+%post
+    apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=5 update && apt-get install -y --no-install-recommends \
+        prodigal \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/*
+    mkdir -p /container/input /container/output
+
+%runscript
+    exec /bin/bash "$@"

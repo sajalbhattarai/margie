@@ -1,0 +1,31 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    maintainer "Bioinformatics Pipeline"
+    description "EggNOG annotation using Diamond"
+    version "1.0"
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+
+%post
+    apt-get update && apt-get install -y \
+        python3 \
+        python3-pip \
+        wget \
+        && rm -rf /var/lib/apt/lists/*
+    wget http://github.com/bbuchfink/diamond/releases/download/v2.1.8/diamond-linux64.tar.gz \
+        && tar xzf diamond-linux64.tar.gz \
+        && mv diamond /usr/local/bin/ \
+        && rm diamond-linux64.tar.gz
+    mkdir -p /container/input /container/output /container/db /container/scripts
+
+%files
+    scripts/ /container/scripts/
+
+%post
+    chmod +x /container/scripts/*.sh
+
+%runscript
+    exec /bin/bash "$@"

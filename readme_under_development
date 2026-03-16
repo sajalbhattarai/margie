@@ -1,0 +1,507 @@
+# Margie Annotation Pipeline (Development Specification)
+
+This document is the implementation contract for the Margie pipeline.
+It defines how gene calling, annotation, formatting, consolidation, logging, CLI, and GUI must work together.
+
+Path convention note:
+- Any mention of `root-dir` means `<root-folder>` (the cloned repository root detected at runtime).
+- Pipeline scripts must derive this path dynamically and must not hard-code machine-specific absolute project paths.
+
+Goal:
+- A user can place genomes in `root-dir/input`, run one command, and obtain consistent per-tool outputs plus a single consolidated table per genome.
+
+Scope:
+- Gene calling: Prodigal or RASTtk.
+- Annotation tools: COG, KEGG, Pfam, TIGRFAM, dbCAN, MEROPS, TCDB, UniProt, eggNOG, PGAP, Operon.
+- Optional additional RASTtk functional annotations when RASTtk is selected as gene caller.
+- Local CLI + beginner-friendly GUI.
+- Containerized execution with Docker or Apptainer/Singularity.
+
+## 1) Core Pipeline Concept
+
+1. User places one or more genome files in `root-dir/input/`.
+2. User selects gene caller:
+- `prodigal`
+- `rasttk`
+3. Gene caller outputs become canonical gene model inputs for all downstream annotation tools.
+4. Each annotation tool generates:
+- native results (unmodified output)
+- processed standardized TSV (`<tool>.tsv`)
+5. Processed TSVs are merged into one consolidated table per genome.
+6. Merge key depends on gene caller:
+- Prodigal: `locus_tag`
+- RASTtk: `feature_id`
+7. First column of every consolidated output is always `organism` (genome filename / sample name).
+
+## 2) Required Root Directory Structure (Current + Target)
+
+Current root layout in this workspace:
+
+```text
+root-dir/
+├── annotate-genome
+├── install_commands.sh
+├── README.md
+├── readme_under_development
+├── links to databases.rtf
+├── requirements-gui.txt
+├── run_gui.sh
+├── setup_containers
+├── setup_containers.sh
+├── setup_databases
+├── setup_databases.sh
+├── app/
+├── db/
+├── docs/
+├── input/
+├── logs/
+├── output/
+├── processing/
+└── reference_genomes/
+```
+
+Operational target layout:
+
+```text
+root-dir/
+├── annotate-genome                        # main entrypoint (CLI)
+├── setup_containers.sh                    # one-time container setup
+├── setup_databases.sh                     # one-time db setup
+├── run_gui.sh                             # GUI launcher
+├── app/
+│   └── gui/
+│       └── streamlit_app.py
+├── db/
+│   ├── cog/
+│   ├── kegg/
+│   ├── pfam/
+│   ├── tigrfam/
+│   ├── dbcan/
+│   ├── merops/
+│   ├── tcdb/
+│   ├── uniprot/
+│   ├── eggnog/
+│   ├── interpro/
+│   └── rasttk/
+├── docs/
+├── input/
+├── logs/
+│   ├── annotation_watcher/
+│   ├── container_setup/
+│   ├── rasttk_batch/
+│   └── ...
+├── output/
+│   ├── prodigal/
+│   ├── rasttk/
+│   ├── cog/
+│   ├── kegg/
+│   ├── pfam/
+│   ├── tigrfam/
+│   ├── dbcan/
+│   ├── merops/
+│   ├── tcdb/
+│   ├── uniprot/
+│   ├── eggnog/
+│   ├── pgap/
+│   ├── operon/
+│   └── consolidated/
+├── processing/
+│   ├── containers/
+│   └── scripts/
+└── reference_genomes/
+```
+
+## 3) Input and Genome Discovery Rules
+
+Accepted input extensions:
+- `.fna`
+- `.fa`
+- `.fasta`
+
+Input location:
+- `root-dir/input/`
+
+Discovery behavior:
+1. Enumerate valid files in `input/`.
+2. Expose file list to user in CLI/GUI.
+3. Allow selecting:
+- one genome
+- multiple genomes
+- all genomes
+4. Record selection to logs.
+
+## 4) Gene Calling Stage
+
+### 4.1 Prodigal Path
+
+Input:
+- genome nucleotide FASTA from `input/`
+
+Output location:
+- `output/prodigal/<organism>/`
+
+Required outputs consumed downstream:
+- protein FASTA
+- nucleotide CDS FASTA
+- gene coordinates
+- strand
+- caller metadata
+
+Canonical key:
+- `locus_tag`
+
+### 4.2 RASTtk Path
+
+Input:
+- genome nucleotide FASTA from `input/`
+
+Output location:
+- `output/rasttk/<organism>/`
+
+RASTtk roles:
+- gene caller
+- annotation source (RASTtk annotation columns are included as tool-prefixed fields)
+
+Canonical key:
+- `feature_id`
+
+Additional RASTtk-derived metadata should be preserved where available.
+
+## 5) Downstream Annotation Stage
+
+All annotation tools consume the selected gene caller outputs.
+
+If gene caller is `prodigal`:
+- all tools consume Prodigal-derived proteins/features.
+
+If gene caller is `rasttk`:
+- all tools consume RASTtk-derived proteins/features.
+- RASTtk annotation fields are additionally included as a prefixed annotation block.
+
+Required annotation modules:
+1. COG
+2. KEGG
+3. Pfam
+4. TIGRFAM
+5. dbCAN
+6. MEROPS
+7. TCDB
+8. UniProt
+9. eggNOG
+10. PGAP
+11. Operon (UniOP-based)
+
+Per-tool output contract:
+- Native output files: `output/<tool>/native/<organism>/...`
+- Processed TSV: `output/<tool>/<tool>.tsv`
+- Tool log: `output/<tool>/logs/<organism>.log` (or equivalent under `logs/` with clear mapping)
+
+## 6) Column Standardization Contract
+
+### 6.1 Prefix Rule
+
+Every annotation-specific field must be prefixed with uppercase tool prefix:
+- `COG_*`
+- `KEGG_*`
+- `PFAM_*`
+- `TIGRFAM_*`
+- `DBCAN_*`
+- `MEROPS_*`
+- `TCDB_*`
+- `UNIPROT_*`
+- `EGGNOG_*`
+- `PGAP_*`
+- `OPERON_*`
+- `RASTTK_*` (annotation-only portion when gene caller is RASTtk)
+
+Redundancy rule:
+- Do not duplicate semantic prefixes.
+- Correct: `COG_description`
+- Incorrect: `COG_cog_description`
+
+### 6.2 Non-prefixed Core Gene Fields
+
+The following remain unprefixed and are treated as universal gene attributes:
+- `organism`
+- `locus_tag` (Prodigal path)
+- `feature_id` (RASTtk path)
+- `gene_content`
+- `nucleotide_sequence`
+- `aa_sequence`
+- `gene_start`
+- `gene_end`
+- `strand`
+- `protein_length`
+- `gene_type` (for example CDS, PEG)
+- `is_partial`
+- `partial_edge`
+- `rbs_info`
+- other intrinsic caller metadata
+
+Identity rule:
+- Exactly one canonical key exists per run mode (`locus_tag` or `feature_id`).
+- The non-selected key may be absent or empty, but consolidation key must be consistent.
+
+## 7) Consolidation Stage
+
+Output location:
+- `output/consolidated/<organism>.tsv`
+
+Merge key:
+- Prodigal run: `locus_tag`
+- RASTtk run: `feature_id`
+
+Join strategy:
+1. Start from gene caller base table as authoritative row set.
+2. Left-join each tool table on canonical key.
+3. Preserve base-row cardinality unless user explicitly enables filtering.
+
+Column order (recommended):
+1. `organism`
+2. canonical key (`locus_tag` or `feature_id`)
+3. non-prefixed core gene fields
+4. prefixed annotation groups in stable tool order
+
+Stable tool order for consolidated columns:
+- COG, KEGG, PFAM, TIGRFAM, DBCAN, MEROPS, TCDB, UNIPROT, EGGNOG, PGAP, OPERON, RASTTK(optional)
+
+## 8) Output Layout Requirements
+
+For each annotation tool `<tool>`:
+
+```text
+output/<tool>/
+├── native/
+│   └── <organism>/
+│       └── <native files>
+├── <tool>.tsv
+└── logs/
+    └── <organism>.log
+```
+
+Gene caller outputs:
+
+```text
+output/prodigal/<organism>/...
+output/rasttk/<organism>/...
+```
+
+Consolidated output:
+
+```text
+output/consolidated/<organism>.tsv
+```
+
+## 9) Database Management
+
+Database root:
+- `root-dir/db/`
+
+Requirements:
+1. First run downloads and indexes required db assets.
+2. Subsequent runs reuse existing db files.
+3. Missing/outdated assets are detectable by status checks.
+4. Runtime-aware indexing should be supported (host binaries or container fallback).
+
+Runtime DB source precedence (annotation execution only):
+1. Prefer shared DB path: `/depot/lindems/data/margie/db/` when present and non-empty.
+2. Fallback to local repo DB path: `root-dir/db/`.
+
+Setup write policy:
+- Setup scripts must never write to `/depot/lindems/data/margie/db/`.
+- `setup_databases.sh` writes only to `root-dir/db/`.
+- Shared depot DB is read-only from the application perspective and can be populated manually by admins/users.
+
+Source links (as provided by project docs + `links to databases.rtf`):
+- COG: NCBI COG data
+- KOFAM: genome.jp kofam
+- eggNOG: eggnog5
+- MEROPS: EBI current release
+- TCDB: tcdb download
+- PFAM: EBI current release
+- TIGRFAM: NCBI TIGRFAM release
+- PGAP: NCBI HMM current
+- UniProt Swiss-Prot: uniprot_sprot.fasta.gz
+- InterPro: InterProScan data path
+- Operon runtime image: `ghcr.io/sajalbhattarai/for_oprn:latest`
+
+Operational note:
+- dbCAN endpoint behavior may change over time; setup code must tolerate mirror redirects and TLS differences where policy permits.
+
+## 10) Container Runtime Contract
+
+Runtime auto-detection priority:
+1. Docker (if daemon available)
+2. Apptainer
+3. Singularity
+4. Fail with guided remediation
+
+Requirements:
+- Tool image mapping is explicit.
+- Platform handling is explicit for mixed-arch hosts.
+- Setup scripts must be idempotent (safe to rerun).
+
+Prebuilt image policy for beginner setup:
+- `setup_containers.sh` should attempt pulling prebuilt GHCR images for `prodigal` and `rasttk` first.
+- If prebuilt pull fails, setup must fall back automatically to local image build.
+- Default prebuilt image names:
+    - `ghcr.io/sajalbhattarai/margie/prodigal-annotation:1.0`
+    - `ghcr.io/sajalbhattarai/margie/rasttk-annotation:1.0`
+- Fork/custom registry overrides are supported through:
+    - `MARGIE_GHCR_OWNER`
+    - `MARGIE_GHCR_REPO`
+    - `MARGIE_GHCR_PRODIGAL_IMAGE`
+    - `MARGIE_GHCR_RASTTK_IMAGE`
+
+Publishing contract:
+- Repository CI should publish core prebuilt images to GHCR so new users can pull them directly during setup.
+- Workflow location: `.github/workflows/publish-core-images.yml`.
+
+## 11) Logging and Provenance Contract
+
+Global logs root:
+- `root-dir/logs/`
+
+Must capture:
+1. User-invoked command and options.
+2. Expanded internal commands (including container invocations).
+3. Start/end timestamps.
+4. Exit code per step.
+5. Tool stdout/stderr paths.
+6. Error stack traces.
+7. Summary status table per run.
+
+Annotation-level logging:
+- Each tool must produce run logs associated with organism/sample.
+
+## 12) CLI Functional Specification (`annotate-genome`)
+
+Primary command:
+- `annotate-genome`
+
+Required options:
+- `--interactive`
+- `--call-genes`
+- per-tool selectors (for example `--cog`, `--kegg`, ..., `--pgap`)
+- `--all` (all annotation tools)
+- `--select <genomes|all>`
+- `--gene-caller <prodigal|rasttk>`
+
+Recommended options:
+- `--setup-containers`
+- `--setup-databases`
+- `--list-genomes`
+- `--status`
+- `--resume`
+- `--force`
+- `--threads <n>`
+- `--runtime <auto|docker|apptainer|singularity>`
+- `--platform <auto|linux/amd64|linux/arm64>`
+
+### 12.1 Interactive Mode Behavior
+
+`--interactive` should:
+1. Run preflight checks.
+2. Show available genomes from `input/`.
+3. Show gene-calling status per genome.
+4. Offer gene caller choice and explain implications.
+5. Offer tool selection (single/multi/all).
+6. Offer setup actions (containers/db) if missing.
+7. Show resumable state if partially complete.
+8. Print exact next command before execution.
+
+### 12.2 Gene Calling Option Behavior
+
+`--call-genes` should:
+1. Ask/select genomes.
+2. Ask/select `prodigal` or `rasttk`.
+3. Execute caller.
+4. Persist caller outputs to standard output paths.
+5. Update status so annotation stage can proceed directly.
+
+## 13) GUI Functional Specification
+
+GUI root:
+- `app/gui/`
+
+Purpose:
+- Enable beginner-friendly local execution without requiring deep CLI knowledge.
+
+Required GUI capabilities:
+1. List genomes in `input/`.
+2. Select gene caller.
+3. Select annotation tools (one/many/all).
+4. Trigger setup containers/databases.
+5. Run pipeline.
+6. Show per-step progress/status.
+7. Show logs/errors.
+8. Open output folders and consolidated results.
+
+GUI behavior rule:
+- GUI must call the same backend orchestration logic as CLI to avoid divergence.
+
+## 14) End-to-End Execution Sequence (Reference)
+
+1. Preflight and runtime detection.
+2. Optional setup containers.
+3. Optional setup databases.
+4. Genome selection from `input/`.
+5. Gene caller selection and run.
+6. For each selected annotation tool:
+- run native annotation
+- store native outputs
+- transform to standardized `<tool>.tsv`
+7. Consolidate all standardized tables by canonical key.
+8. Emit `output/consolidated/<organism>.tsv`.
+9. Write summary + detailed logs.
+
+## 15) Data Quality and Validation Gates
+
+Minimum run-success checks per genome:
+1. Gene caller output exists and non-empty.
+2. Canonical merge key present and unique per gene row.
+3. Each requested tool has either:
+- a valid `<tool>.tsv`, or
+- a logged failure state with reason.
+4. Consolidated table exists and contains:
+- first column `organism`
+- canonical key
+- core gene fields
+- available tool-prefixed fields
+5. Run summary report written with pass/fail counts.
+
+## 16) Error Handling Rules
+
+1. Tool failure must not silently corrupt consolidated output.
+2. Partial runs should be resumable.
+3. Missing database or image should produce actionable remediation messages.
+4. Every non-zero tool exit must include command + stderr path in logs.
+
+## 17) Implementation Notes for Current Development Cycle
+
+Priority integration requirements:
+1. Keep this document as the single source of truth for flow and output contracts.
+2. Ensure annotation formatting scripts enforce prefix and non-prefix rules exactly.
+3. Ensure RASTtk dual-role behavior is handled correctly:
+- gene-caller outputs as base rows
+- RASTtk annotation fields as prefixed annotation block
+4. Ensure all tool outputs follow:
+- `output/<tool>/native/<organism>/...`
+- `output/<tool>/<tool>.tsv`
+5. Ensure final consolidation always writes:
+- `output/consolidated/<organism>.tsv`
+
+## 18) Definition of Done
+
+The pipeline is considered working when:
+1. A user can run from root with CLI or GUI.
+2. One or more genomes in `input/` can be processed end-to-end.
+3. Both gene caller modes (`prodigal`, `rasttk`) produce valid consolidated outputs.
+4. Requested tools run and emit standardized TSVs with correct column naming.
+5. Consolidated table merges correctly by canonical key.
+6. Logs and provenance are complete and readable.
+7. Re-running setup and pipeline is idempotent and resumable.
+
+---
+
+This development specification should be updated whenever the pipeline contract changes.

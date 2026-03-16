@@ -1,0 +1,31 @@
+Bootstrap: docker
+From: continuumio/miniconda3:latest
+
+%labels
+    maintainer "Bioinformatics Pipeline"
+    description "COG annotation using official COGclassifier workflow"
+    version "1.0"
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+    export PATH=/opt/conda/bin:$PATH
+
+%post
+    apt-get update && apt-get install -y \
+        bash \
+        ca-certificates \
+        coreutils \
+        procps \
+        && rm -rf /var/lib/apt/lists/*
+    conda install -y -c conda-forge -c bioconda cogclassifier blast
+    conda clean -afy
+    mkdir -p /container/input /container/output /container/db /container/scripts
+
+%files
+    scripts/ /container/scripts/
+
+%post
+    find /container/scripts -maxdepth 1 -type f -name "*.sh" -exec chmod +x {} \;
+
+%runscript
+    exec /bin/bash "$@"

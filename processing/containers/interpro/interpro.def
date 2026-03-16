@@ -1,0 +1,16 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    maintainer "Bioinformatics Pipeline"
+    description "InterPro mapping container"
+    version "1.0"
+
+%post
+    mkdir -p /container/scripts /container/input /container/output /container/db
+
+%files
+    scripts/run_interpro_mapping.py /container/scripts/run_interpro_mapping.py
+
+%runscript
+    exec python3 /container/scripts/run_interpro_mapping.py "$@"
