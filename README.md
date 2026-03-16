@@ -1,4 +1,9 @@
-# Margie: Mostly Automated Rapid Genome Inference Environmant
+# Margie: Mostly Automated Rapid Genome Inference Environment
+
+The development of this pipeline has been possible due to combined efforts of following scientists:
+**Sajal Bhattarai**, Department of Food Science, Purdue University (developer)
+**Dane Deemer**, Rosen Advanced Computing CLuster, Purdue University (developer)
+**Stephen R Lindemann**, Department of Food Science, Purdue University (Supervisor)
 
 ## Overview
 
