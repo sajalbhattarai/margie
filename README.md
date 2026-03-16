@@ -1,4 +1,4 @@
-# Margie: Mostly Automated Rapid Genome Inference Environment
+# Margie: Mostly Automated Rapid Genome Inference Environment (under development)
 
 The development of this pipeline has been possible due to combined efforts of following scientists:
 
