@@ -1382,8 +1382,12 @@ run_interactive() {
     # ── 2: Pipeline readiness ──────────────────────────────────────────────
     echo ""
     echo -e "${BOLD}━━  Step 2 / 6 — Pipeline Readiness  ━━━━━━━━━━━━━━━━━━${NC}"
-    pipeline_readiness_check
-    local ready_rc=$?
+    local ready_rc=0
+    if pipeline_readiness_check; then
+        ready_rc=0
+    else
+        ready_rc=$?
+    fi
     print_readiness_report
 
     local skip_setup=0
