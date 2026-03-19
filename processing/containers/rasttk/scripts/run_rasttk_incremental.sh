@@ -10,6 +10,7 @@ OUTPUT_DIR=${3:-"output/rasttk/theta"}
 SCIENTIFIC_NAME=${4:-"Bacteroides thetaiotaomicron"}
 GENETIC_CODE=${5:-11}
 DOMAIN=${6:-"Bacteria"}
+RUN_MODE=${7:-"full"}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BVBRC="$SCRIPT_DIR/run_with_bvbrc.sh"
@@ -23,7 +24,16 @@ echo "Output: $OUTPUT_DIR"
 echo "Scientific Name: $SCIENTIFIC_NAME"
 echo "Genetic Code: $GENETIC_CODE"
 echo "Domain: $DOMAIN"
+echo "Run mode: $RUN_MODE"
 echo ""
+
+case "$RUN_MODE" in
+    full|only-prodigal|only-prodigal-and-glimmer) ;;
+    *)
+        echo "Error: Unsupported RUN_MODE '$RUN_MODE'. Use: full | only-prodigal | only-prodigal-and-glimmer"
+        exit 1
+        ;;
+esac
 
 if [ ! -f "$INPUT_FASTA" ]; then
     echo "Error: Input genome not found at $INPUT_FASTA"
@@ -45,49 +55,79 @@ echo ""
 
 # Step 2: Call rRNA genes
 echo "=== [2/15] Calling rRNA genes ==="
-$BVBRC rast-call-features-rRNA-SEED \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.1" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.2"
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.1" "$OUTPUT_DIR/${GENOME_NAME}.gto.2"
+    echo "⚠ Skipped in fast mode"
+else
+    $BVBRC rast-call-features-rRNA-SEED \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.1" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.2"
+fi
 echo "✓ rRNA genes called"
 echo ""
 
 # Step 3: Call tRNA genes
 echo "=== [3/15] Calling tRNA genes ==="
-$BVBRC rast-call-features-tRNA-trnascan \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.2" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.3"
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.2" "$OUTPUT_DIR/${GENOME_NAME}.gto.3"
+    echo "⚠ Skipped in fast mode"
+else
+    $BVBRC rast-call-features-tRNA-trnascan \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.2" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.3"
+fi
 echo "✓ tRNA genes called"
 echo ""
 
 # Step 4: Call repeat regions
 echo "=== [4/15] Calling repeat regions ==="
-$BVBRC rast-call-features-repeat-region-SEED \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.3" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.4"
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.3" "$OUTPUT_DIR/${GENOME_NAME}.gto.4"
+    echo "⚠ Skipped in fast mode"
+else
+    $BVBRC rast-call-features-repeat-region-SEED \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.3" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.4"
+fi
 echo "✓ Repeat regions called"
 echo ""
 
 # Step 5: Call selenoproteins
 echo "=== [5/15] Calling selenoproteins ==="
-$BVBRC rast-call-features-selenoprotein \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.4" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.5"
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.4" "$OUTPUT_DIR/${GENOME_NAME}.gto.5"
+    echo "⚠ Skipped in fast mode"
+else
+    $BVBRC rast-call-features-selenoprotein \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.4" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.5"
+fi
 echo "✓ Selenoproteins called"
 echo ""
 
 # Step 6: Call pyrrolysoproteins
 echo "=== [6/15] Calling pyrrolysoproteins ==="
-$BVBRC rast-call-features-pyrrolysoprotein \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.5" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.6"
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.5" "$OUTPUT_DIR/${GENOME_NAME}.gto.6"
+    echo "⚠ Skipped in fast mode"
+else
+    $BVBRC rast-call-features-pyrrolysoprotein \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.5" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.6"
+fi
 echo "✓ Pyrrolysoproteins called"
 echo ""
 
 # Step 7: Call CRISPRs
 echo "=== [7/15] Calling CRISPR elements ==="
-$BVBRC rast-call-features-crispr \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.6" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.7"
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.6" "$OUTPUT_DIR/${GENOME_NAME}.gto.7"
+    echo "⚠ Skipped in fast mode"
+else
+    $BVBRC rast-call-features-crispr \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.6" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.7"
+fi
 echo "✓ CRISPR elements called"
 echo ""
 
@@ -101,9 +141,14 @@ echo ""
 
 # Step 9: Call protein-encoding genes with Glimmer3
 echo "=== [9/15] Calling protein-encoding genes (Glimmer3) ==="
-$BVBRC rast-call-features-CDS-glimmer3 \
-    < "$OUTPUT_DIR/${GENOME_NAME}.gto.8" \
-    > "$OUTPUT_DIR/${GENOME_NAME}.gto.9"
+if [ "$RUN_MODE" = "only-prodigal" ]; then
+    cp "$OUTPUT_DIR/${GENOME_NAME}.gto.8" "$OUTPUT_DIR/${GENOME_NAME}.gto.9"
+    echo "⚠ Glimmer3 skipped in only-prodigal mode"
+else
+    $BVBRC rast-call-features-CDS-glimmer3 \
+        < "$OUTPUT_DIR/${GENOME_NAME}.gto.8" \
+        > "$OUTPUT_DIR/${GENOME_NAME}.gto.9"
+fi
 echo "✓ Glimmer3 genes called"
 echo ""
 
