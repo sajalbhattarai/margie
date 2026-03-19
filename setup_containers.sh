@@ -435,6 +435,37 @@ mark_containers_ready() {
         "docker_platform=$DOCKER_PLATFORM_RESOLVED"
 }
 
+ALL_DATABASES=(cog pfam tigrfam dbcan kegg eggnog merops tcdb uniprot interpro rasttk)
+
+is_db_ready_minimal() {
+    local db="$1"
+    case "$db" in
+        cog) [[ -f "$SCRIPT_DIR/db/cog/cog-24.def.tab" && -f "$SCRIPT_DIR/db/cog/cddid.tbl.gz" && -f "$SCRIPT_DIR/db/cog/Cog_LE.tar.gz" ]] ;;
+        pfam) [[ -f "$SCRIPT_DIR/db/pfam/Pfam-A.hmm" ]] ;;
+        tigrfam) [[ -f "$SCRIPT_DIR/db/tigrfam/TIGRFAMs_15.0_HMM.LIB" ]] ;;
+        dbcan) [[ -f "$SCRIPT_DIR/db/dbcan/dbCAN.txt" || -f "$SCRIPT_DIR/db/dbcan/dbCAN-HMMdb-V12.txt" || -f "$SCRIPT_DIR/db/dbcan/dbCAN-HMMdb-V14.txt" ]] ;;
+        kegg) [[ -f "$SCRIPT_DIR/db/kegg/ko_list" && -d "$SCRIPT_DIR/db/kegg/profiles" ]] ;;
+        eggnog) [[ -f "$SCRIPT_DIR/db/eggnog/eggnog.db" && -f "$SCRIPT_DIR/db/eggnog/eggnog_proteins.dmnd" ]] ;;
+        merops) [[ -f "$SCRIPT_DIR/db/merops/pepunit.lib" && -f "$SCRIPT_DIR/db/merops/merops.dmnd" ]] ;;
+        tcdb) [[ -f "$SCRIPT_DIR/db/tcdb/tcdb.fasta" && ( -f "$SCRIPT_DIR/db/tcdb/tcdb_blast.pin" || -f "$SCRIPT_DIR/db/tcdb/tcdb_blast.phr" ) ]] ;;
+        uniprot) [[ -f "$SCRIPT_DIR/db/uniprot/uniprot_sprot.fasta" ]] ;;
+        interpro) [[ -f "$SCRIPT_DIR/db/interpro/signature_to_ipr.tsv" || -f "$SCRIPT_DIR/db/interpro/signature_to_ipr.dat" ]] ;;
+        rasttk) [[ -f "$SCRIPT_DIR/db/rasttk/subsystem_mapping.tsv" && -d "$SCRIPT_DIR/db/rasttk/variant_definitions" ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+all_dbs_ready_minimal() {
+    local db
+    for db in "${ALL_DATABASES[@]}"; do
+        if ! is_db_ready_minimal "$db"; then
+            echo "$db"
+            return 1
+        fi
+    done
+    return 0
+}
+
 is_default_full_setup_request() {
     [[ "$TOOL_SELECTION" == "all" && "$SETUP_DB" -eq 1 && "$DB_SELECTION" == "all" && "$BUILD_GUI" -eq 0 ]]
 }
@@ -453,10 +484,14 @@ tool_selected() {
 
 if [[ "$DRY_RUN" -eq 0 && "${MARGIE_FORCE_SETUP:-0}" != "1" ]]; then
     if is_default_full_setup_request && [[ -f "$STATE_CONTAINERS_FILE" && -f "$STATE_DATABASES_FILE" ]]; then
-        echo -e "${GREEN}Setup already recorded as complete; skipping container and database setup.${NC}"
-        echo "Marker files: $STATE_CONTAINERS_FILE and $STATE_DATABASES_FILE"
-        echo "Set MARGIE_FORCE_SETUP=1 to force a full rebuild."
-        exit 0
+        if missing_db="$(all_dbs_ready_minimal)"; then
+            echo -e "${GREEN}Setup already recorded as complete; skipping container and database setup.${NC}"
+            echo "Marker files: $STATE_CONTAINERS_FILE and $STATE_DATABASES_FILE"
+            echo "Set MARGIE_FORCE_SETUP=1 to force a full rebuild."
+            exit 0
+        else
+            echo -e "${YELLOW}State markers found, but database '${missing_db}' is incomplete. Continuing setup.${NC}"
+        fi
     fi
 
     if is_default_container_only_request && [[ -f "$STATE_CONTAINERS_FILE" ]]; then
