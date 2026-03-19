@@ -742,6 +742,56 @@ dbcan_build_fallback() {
     fi
 }
 
+dbcan_pick_hmm_db() {
+    if [[ -f dbCAN-HMMdb-V14.txt ]]; then
+        echo "dbCAN-HMMdb-V14.txt"
+        return 0
+    fi
+    if [[ -f dbCAN.txt ]]; then
+        echo "dbCAN.txt"
+        return 0
+    fi
+    if [[ -f dbCAN-HMMdb-V12.txt ]]; then
+        echo "dbCAN-HMMdb-V12.txt"
+        return 0
+    fi
+    return 1
+}
+
+dbcan_assets_ready() {
+    local hmm_db=""
+    if ! hmm_db="$(dbcan_pick_hmm_db)"; then
+        return 1
+    fi
+
+    [[ -f "$hmm_db" ]] || return 1
+
+    # Keep checks intentionally permissive: if these core assets exist,
+    # skip re-downloading and reuse local dbCAN/CAZy files.
+    if [[ ! -f CAZyDB.fa && ! -f CAZyDB.07242025.fa ]]; then
+        return 1
+    fi
+    if [[ ! -f fam-substrate-mapping.tsv && ! -f fam-substrate-mapping-08262025.tsv && ! -f substrate-mappings.tsv ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+dbcan_try_press_if_missing() {
+    local hmm_db="$1"
+
+    if [[ -n "$hmm_db" && ( ! -f "${hmm_db}.h3f" || ! -f "${hmm_db}.h3i" || ! -f "${hmm_db}.h3m" || ! -f "${hmm_db}.h3p" ) ]]; then
+        echo -e "${YELLOW}  ! Existing dbCAN HMM database found but index is incomplete; attempting hmmpress.${NC}"
+        dbcan_run_tool hmmpress "$hmm_db" || true
+    fi
+
+    if [[ -f dbCAN_sub.hmm && ( ! -f dbCAN_sub.hmm.h3f || ! -f dbCAN_sub.hmm.h3i || ! -f dbCAN_sub.hmm.h3m || ! -f dbCAN_sub.hmm.h3p ) ]]; then
+        echo -e "${YELLOW}  ! Existing dbCAN_sub.hmm found but index is incomplete; attempting hmmpress.${NC}"
+        dbcan_run_tool hmmpress -f dbCAN_sub.hmm || true
+    fi
+}
+
 gunzip_if_present() {
     local gz="$1"
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -913,6 +963,17 @@ setup_dbcan() {
     cmd mkdir -p "$DB_DIR/dbcan"
     cmd mkdir -p "$DB_DIR/dbcan/tools"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/dbcan"
+
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        local existing_hmm_db=""
+        if dbcan_assets_ready; then
+            existing_hmm_db="$(dbcan_pick_hmm_db || true)"
+            dbcan_try_press_if_missing "$existing_hmm_db"
+            echo -e "${GREEN}  ✓ Reusing existing dbCAN/CAZy assets from $DB_DIR/dbcan (download skipped)${NC}"
+            echo -e "${GREEN}  ✓ dbCAN database ready${NC}"
+            return 0
+        fi
+    fi
 
     local cpus
     cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
