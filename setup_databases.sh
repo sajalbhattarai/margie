@@ -360,10 +360,23 @@ run_indexer() {
     local db_name="$1"
     shift
 
-    # Make hmmpress reruns idempotent by removing stale sidecar indices first.
+    # Keep pre-indexed HMMER sidecars by default so copied DBs are reusable.
+    # Set MARGIE_FORCE_HMMPRESS=1 to force regeneration.
     if [[ "$1" == "hmmpress" && "$#" -ge 2 ]]; then
         local hmm_target
         hmm_target="${@: -1}"
+
+        if [[ "${MARGIE_FORCE_HMMPRESS:-0}" != "1" ]] \
+            && [[ -s "$hmm_target" ]] \
+            && [[ -s "${hmm_target}.h3f" ]] \
+            && [[ -s "${hmm_target}.h3i" ]] \
+            && [[ -s "${hmm_target}.h3m" ]] \
+            && [[ -s "${hmm_target}.h3p" ]]; then
+            echo -e "${YELLOW}  ! Existing HMMER index detected for ${hmm_target}; skipping hmmpress (set MARGIE_FORCE_HMMPRESS=1 to rebuild).${NC}"
+            return 0
+        fi
+
+        # Make forced reruns idempotent by removing stale sidecar indices first.
         if [[ "$DRY_RUN" -eq 1 ]]; then
             cmd rm -f "${hmm_target}.h3f" "${hmm_target}.h3i" "${hmm_target}.h3m" "${hmm_target}.h3p"
         else
