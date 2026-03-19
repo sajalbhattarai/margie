@@ -43,6 +43,8 @@ DRY_RUN_PIPELINE=0
 NON_INTERACTIVE=0
 WANT_GUI=""
 _MODE=""
+RUN_SCORING=0
+RUN_PULS=0
 
 # ── Tool catalogue ─────────────────────────────────────────────────────────────
 ALL_DB_TOOLS=(cog pfam tigrfam kegg dbcan eggnog merops tcdb uniprot interpro rasttk operon)
@@ -109,6 +111,10 @@ ${BOLD}ANNOTATION CONTROL${NC}
                       (default: all)
   --redo              Re-annotate even genomes marked as complete.
                       Overwrites existing results.
+    --scoring           Run concordance scoring after consolidation.
+                                            Outputs to: output/scoring/<genome>/scoring.tsv
+    --puls              Run PUL detection after consolidation.
+                                            Outputs to: output/puls/<genome>/puls.tsv
 
 ${BOLD}COMPUTING RESOURCES${NC}
   --nodes N, -N N     Total CPU cores available to the pipeline.
@@ -1207,6 +1213,7 @@ run_annotation_for_genome() {
     # ── Final: Consolidation ──────────────────────────────────────────────
     echo -e "  ${CYAN}[run]  consolidation${NC}"
     local consolidate_input_root="$consolidation_out/.input_root"
+    local consolidated_file="$consolidation_out/consolidated_${genome_name}.tsv"
 
     if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
         rm -rf "$consolidate_input_root"
@@ -1221,13 +1228,56 @@ run_annotation_for_genome() {
 
         python3 "$CONTAINERS_DIR/consolidation/consolidate_all_annotations.py" \
             --input-root "$consolidate_input_root" \
-            --output     "$consolidation_out/consolidated_${genome_name}.tsv" \
+            --output     "$consolidated_file" \
             2>&1 | tee -a "$consolidation_out/consolidation.log" \
             || echo -e "    ${YELLOW}[warn] Consolidation step encountered errors.${NC}"
 
         rm -rf "$consolidate_input_root"
     else
-        echo "    → consolidate_all_annotations.py --input-root $consolidate_input_root --output $consolidation_out/consolidated_${genome_name}.tsv"
+        echo "    → consolidate_all_annotations.py --input-root $consolidate_input_root --output $consolidated_file"
+    fi
+
+    # ── Optional post-processing stages ─────────────────────────────────
+    if [[ "$RUN_SCORING" -eq 1 ]]; then
+        local scoring_root="$OUTPUT_DIR/scoring"
+        local scoring_file="$scoring_root/$genome_name/scoring.tsv"
+        echo -e "  ${CYAN}[run]  scoring${NC}"
+        if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
+            if [[ -f "$consolidated_file" ]]; then
+                bash "$SCRIPT_DIR/processing/scripts/scoring/run_concordance.sh" \
+                    --genome "$genome_name" \
+                    --consolidated "$consolidated_file" \
+                    --consolidated-dir "$OUTPUT_DIR/consolidation" \
+                    --output-root "$scoring_root" \
+                    || echo -e "    ${YELLOW}[warn] Scoring step encountered errors.${NC}"
+            else
+                echo -e "    ${YELLOW}[skip] scoring requires consolidated output; file missing.${NC}"
+            fi
+        else
+            echo "    → run_concordance.sh --genome $genome_name --consolidated $consolidated_file --consolidated-dir $OUTPUT_DIR/consolidation --output-root $scoring_root"
+        fi
+        [[ -f "$scoring_file" ]] && echo "    score file: $scoring_file"
+    fi
+
+    if [[ "$RUN_PULS" -eq 1 ]]; then
+        local puls_root="$OUTPUT_DIR/puls"
+        local puls_file="$puls_root/$genome_name/puls.tsv"
+        echo -e "  ${CYAN}[run]  PUL detection${NC}"
+        if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
+            if [[ -f "$consolidated_file" ]]; then
+                bash "$SCRIPT_DIR/processing/scripts/puls/run_pul_detection.sh" \
+                    --input "$consolidated_file" \
+                    --output "$puls_root" \
+                    --name "$genome_name" \
+                    --html \
+                    || echo -e "    ${YELLOW}[warn] PUL detection step encountered errors.${NC}"
+            else
+                echo -e "    ${YELLOW}[skip] PUL detection requires consolidated output; file missing.${NC}"
+            fi
+        else
+            echo "    → run_pul_detection.sh --input $consolidated_file --output $puls_root --name $genome_name --html"
+        fi
+        [[ -f "$puls_file" ]] && echo "    pul file:   $puls_file"
     fi
 
     echo ""
@@ -1615,6 +1665,14 @@ run_interactive() {
     read -r -p "  Databases            [default: all]: " user_dbs
     DB_SELECTION="${user_dbs:-all}"
 
+    echo ""
+    if prompt_yes_no "  Run concordance scoring after consolidation?" "n"; then
+        RUN_SCORING=1
+    fi
+    if prompt_yes_no "  Run PUL detection after consolidation?" "n"; then
+        RUN_PULS=1
+    fi
+
     if command -v sbatch >/dev/null 2>&1; then
         if prompt_yes_no "  Submit via SLURM?" "n"; then
             USE_SLURM=1
@@ -1631,6 +1689,8 @@ run_interactive() {
     printf "    %-20s %s\n" "Tasks:"       "$TASKS"
     printf "    %-20s %s\n" "Threads:"     "$THREADS"
     printf "    %-20s %s\n" "Databases:"   "$DB_SELECTION"
+    printf "    %-20s %s\n" "Scoring:"     "$([[ "$RUN_SCORING" -eq 1 ]] && echo enabled || echo disabled)"
+    printf "    %-20s %s\n" "PUL detection:" "$([[ "$RUN_PULS" -eq 1 ]] && echo enabled || echo disabled)"
     [[ "$USE_SLURM" -eq 1 ]] && printf "    %-20s %s\n" "SLURM account:" "${SLURM_ACCOUNT:-<none>}"
     [[ "$USE_SLURM" -eq 1 ]] && printf "    %-20s %s\n" "SLURM partition:" "${SLURM_PARTITION:-<none>}"
     echo ""
@@ -1760,6 +1820,8 @@ while [[ $# -gt 0 ]]; do
         --docker)          CONTAINER_RUNTIME="docker";    SETUP_PASSTHROUGH+=("--docker");    shift ;;
         --apptainer)       CONTAINER_RUNTIME="apptainer"; SETUP_PASSTHROUGH+=("--apptainer"); shift ;;
         --redo)            PIPELINE_REDO=1;      shift ;;
+        --scoring)         RUN_SCORING=1;        shift ;;
+        --puls)            RUN_PULS=1;           shift ;;
         --dry-run)         DRY_RUN_PIPELINE=1;   shift ;;
         -h|--help)         show_usage; exit 0 ;;
 
