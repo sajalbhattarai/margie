@@ -45,6 +45,7 @@ WANT_GUI=""
 _MODE=""
 RUN_SCORING=0
 RUN_PULS=0
+RUN_SYNTENY=0
 RASTTK_RUN_MODE="full"
 
 # ── Tool catalogue ─────────────────────────────────────────────────────────────
@@ -116,6 +117,8 @@ ${BOLD}ANNOTATION CONTROL${NC}
                                             Outputs to: output/scoring/<genome>/scoring.tsv
     --puls              Run PUL detection after consolidation.
                                             Outputs to: output/puls/<genome>/puls.tsv
+    --synteny           Run MCScanX synteny workflow after annotation run.
+                                            Outputs to: output/synteny/
     --only-prodigal     RASTtk fast mode: skip steps 2-7 and Glimmer step.
     --only-prodigal-and-glimmer
                                             RASTtk fast mode: skip steps 2-7, keep Glimmer step.
@@ -309,24 +312,37 @@ check_postprocessing_readiness() {
         echo -e "${YELLOW}[warn] PUL wrapper missing: $SCRIPT_DIR/processing/scripts/puls/run_pul_detection.sh${NC}"
         ok=0
     fi
+    if [[ ! -x "$SCRIPT_DIR/processing/scripts/synteny/run_mcscanx_workflow.sh" ]]; then
+        echo -e "${YELLOW}[warn] Synteny wrapper missing: $SCRIPT_DIR/processing/scripts/synteny/run_mcscanx_workflow.sh${NC}"
+        ok=0
+    fi
 
     if ! command -v python3 >/dev/null 2>&1; then
-        echo -e "${YELLOW}[warn] python3 not found; scoring and PUL stages require Python.${NC}"
+        echo -e "${YELLOW}[warn] python3 not found; scoring/PUL/synteny stages require Python.${NC}"
         ok=0
     elif ! python3 - <<'PY' >/dev/null 2>&1
 import pandas
 PY
     then
-        echo -e "${YELLOW}[warn] pandas is not available in current python3 environment; scoring/PUL may fail.${NC}"
+        echo -e "${YELLOW}[warn] pandas is not available in current python3 environment; scoring/PUL/synteny join may fail.${NC}"
+        ok=0
+    fi
+
+    if ! command -v diamond >/dev/null 2>&1; then
+        echo -e "${YELLOW}[warn] diamond not found; synteny workflow requires DIAMOND on PATH.${NC}"
+        ok=0
+    fi
+    if ! command -v MCScanX >/dev/null 2>&1; then
+        echo -e "${YELLOW}[warn] MCScanX not found; synteny workflow requires MCScanX on PATH.${NC}"
         ok=0
     fi
 
     if [[ "$ok" -eq 1 ]]; then
-        echo -e "${GREEN}Post-processing readiness: scoring and PUL dependencies look available.${NC}"
+        echo -e "${GREEN}Post-processing readiness: scoring, PUL, and synteny dependencies look available.${NC}"
         return 0
     fi
 
-    echo -e "${YELLOW}Tip: run scoring/PUL only after ensuring python3 + pandas are installed.${NC}"
+    echo -e "${YELLOW}Tip: scoring/PUL need python3+pandas; synteny also needs diamond+MCScanX in PATH.${NC}"
     return 1
 }
 
@@ -400,6 +416,30 @@ run_puls_for_existing_consolidated() {
     if [[ "$found_any" -eq 0 ]]; then
         echo -e "${YELLOW}No consolidated files found under $OUTPUT_DIR/consolidation${NC}"
     fi
+}
+
+run_synteny_for_existing_consolidated() {
+    local genomes_csv="${1:-}"
+    local synteny_root="$OUTPUT_DIR/synteny"
+    local synteny_script="$SCRIPT_DIR/processing/scripts/synteny/run_mcscanx_workflow.sh"
+
+    if [[ ! -x "$synteny_script" ]]; then
+        echo -e "${RED}Missing synteny workflow script: $synteny_script${NC}"
+        return 1
+    fi
+
+    local args=(
+        --rasttk-dir "$OUTPUT_DIR/rasttk"
+        --consolidated-dir "$OUTPUT_DIR/consolidation"
+        --outdir "$synteny_root"
+        --threads "$(effective_threads)"
+    )
+
+    if [[ -n "$genomes_csv" ]]; then
+        args+=(--genomes "$genomes_csv")
+    fi
+
+    bash "$synteny_script" "${args[@]}"
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1388,6 +1428,11 @@ run_annotation_for_genome() {
         [[ -f "$puls_file" ]] && echo "    pul file:   $puls_file"
     fi
 
+    if [[ "$RUN_SYNTENY" -eq 1 ]]; then
+        echo -e "  ${CYAN}[run]  synteny${NC}"
+        echo -e "    ${YELLOW}[skip] synteny is run once after batch completion; use --run/auto mode with >=2 RASTtk genomes.${NC}"
+    fi
+
     echo ""
     echo -e "  ${GREEN}✔  Done: ${genome_name}${NC}"
     echo "     Results in: $OUTPUT_DIR/<tool>/$genome_name"
@@ -1504,6 +1549,16 @@ run_auto() {
     echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}${BOLD}  Annotation run complete. Results in: $OUTPUT_DIR${NC}"
     echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    if [[ "$RUN_SYNTENY" -eq 1 ]]; then
+        echo -e "  ${CYAN}[run]  synteny (post-batch)${NC}"
+        if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
+            run_synteny_for_existing_consolidated || \
+                echo -e "    ${YELLOW}[warn] Synteny workflow encountered errors.${NC}"
+        else
+            echo "    → run_mcscanx_workflow.sh --rasttk-dir $OUTPUT_DIR/rasttk --consolidated-dir $OUTPUT_DIR/consolidation --outdir $OUTPUT_DIR/synteny"
+        fi
+    fi
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1780,6 +1835,9 @@ run_interactive() {
     if prompt_yes_no "  Run PUL detection after consolidation?" "n"; then
         RUN_PULS=1
     fi
+    if prompt_yes_no "  Run synteny workflow after run (requires >=2 RASTtk genomes)?" "n"; then
+        RUN_SYNTENY=1
+    fi
 
     if [[ "$DB_SELECTION" == "all" || ",$DB_SELECTION," == *",rasttk,"* ]]; then
         echo ""
@@ -1813,6 +1871,7 @@ run_interactive() {
     printf "    %-20s %s\n" "Databases:"   "$DB_SELECTION"
     printf "    %-20s %s\n" "Scoring:"     "$([[ "$RUN_SCORING" -eq 1 ]] && echo enabled || echo disabled)"
     printf "    %-20s %s\n" "PUL detection:" "$([[ "$RUN_PULS" -eq 1 ]] && echo enabled || echo disabled)"
+    printf "    %-20s %s\n" "Synteny:" "$([[ "$RUN_SYNTENY" -eq 1 ]] && echo enabled || echo disabled)"
     printf "    %-20s %s\n" "RASTtk mode:" "$RASTTK_RUN_MODE"
     [[ "$USE_SLURM" -eq 1 ]] && printf "    %-20s %s\n" "SLURM account:" "${SLURM_ACCOUNT:-<none>}"
     [[ "$USE_SLURM" -eq 1 ]] && printf "    %-20s %s\n" "SLURM partition:" "${SLURM_PARTITION:-<none>}"
@@ -1871,9 +1930,10 @@ interactive_menu() {
         echo "  10)  Launch GUI"
         echo "  11)  Run scoring on existing consolidated outputs"
         echo "  12)  Run PUL detection on existing consolidated outputs"
+        echo "  13)  Run synteny on existing RASTtk outputs"
         echo "   q)  Quit"
         echo ""
-        read -r -p "  Select [1-12, q]: " choice
+        read -r -p "  Select [1-13, q]: " choice
 
         case "$choice" in
             1)  run_preflight || true ;;
@@ -1909,6 +1969,10 @@ interactive_menu() {
                 read -r -p "  Genome name (blank = all consolidated genomes): " puls_genome
                 run_puls_for_existing_consolidated "${puls_genome:-}"
                 ;;
+         13)
+             read -r -p "  Genome list CSV (blank = auto-discover all): " synteny_genomes
+             run_synteny_for_existing_consolidated "${synteny_genomes:-}"
+             ;;
             q|Q) echo "  Exiting."; break ;;
             *)   echo "  Invalid option." ;;
         esac
@@ -1955,6 +2019,7 @@ while [[ $# -gt 0 ]]; do
         --redo)            PIPELINE_REDO=1;      shift ;;
         --scoring)         RUN_SCORING=1;        shift ;;
         --puls)            RUN_PULS=1;           shift ;;
+        --synteny)         RUN_SYNTENY=1;        shift ;;
         --only-prodigal)   RASTTK_RUN_MODE="only-prodigal"; shift ;;
         --only-prodigal-and-glimmer)
                    RASTTK_RUN_MODE="only-prodigal-and-glimmer"; shift ;;
