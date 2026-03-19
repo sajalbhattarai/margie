@@ -852,6 +852,27 @@ validate_gzip_file() {
     return 0
 }
 
+file_nonempty() {
+    local file="$1"
+    [[ -f "$file" && -s "$file" ]]
+}
+
+diamond_index_ready() {
+    local db_prefix="$1"
+    [[ -f "${db_prefix}.dmnd" ]]
+}
+
+blast_index_ready() {
+    local db_prefix="$1"
+    [[ -f "${db_prefix}.pin" || -f "${db_prefix}.phr" || -f "${db_prefix}.psq" ]]
+}
+
+is_fasta_like() {
+    local fasta_file="$1"
+    [[ -s "$fasta_file" ]] || return 1
+    head -n 1 "$fasta_file" 2>/dev/null | grep -q '^>'
+}
+
 sanitize_fasta_sequences() {
     local input="$1"
     local output="$2"
@@ -902,6 +923,17 @@ setup_cog() {
     cmd mkdir -p "$DB_DIR/cog"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/cog"
 
+    if [[ "$DRY_RUN" -eq 0 ]] \
+        && file_nonempty cog-24.def.tab \
+        && file_nonempty cog-24.fun.tab \
+        && file_nonempty cddid.tbl.gz \
+        && file_nonempty Cog_LE.tar.gz; then
+        echo -e "${GREEN}  ✓ Reusing existing COG files (download skipped)${NC}"
+        echo "  COGclassifier will use these local resources via --download_dir db/cog."
+        echo -e "${GREEN}  ✓ COG database ready${NC}"
+        return 0
+    fi
+
     # Official COGclassifier workflow resources (COG + CDD)
     download "$COG_BASE/cog-24.def.tab"
     download "$COG_BASE/cog-24.fun.tab"
@@ -925,12 +957,25 @@ setup_pfam() {
     cmd mkdir -p "$DB_DIR/pfam"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/pfam"
 
-    download "$PFAM_BASE/Pfam-A.hmm.gz"
-    download_optional "$PFAM_BASE/Pfam-A.hmm.dat.gz"
+    if [[ "$DRY_RUN" -eq 0 ]] && file_nonempty Pfam-A.hmm; then
+        echo -e "${GREEN}  ✓ Reusing existing Pfam HMM file (download skipped)${NC}"
+        if ! run_indexer "pfam" hmmpress Pfam-A.hmm; then
+            echo -e "${YELLOW}  ! Existing Pfam files failed during hmmpress; re-downloading.${NC}"
+            rm -f Pfam-A.hmm Pfam-A.hmm.gz Pfam-A.hmm.h3f Pfam-A.hmm.h3i Pfam-A.hmm.h3m Pfam-A.hmm.h3p
+            download "$PFAM_BASE/Pfam-A.hmm.gz"
+            gunzip_if_present "Pfam-A.hmm.gz"
+            run_indexer "pfam" hmmpress Pfam-A.hmm
+        fi
+    else
+        download "$PFAM_BASE/Pfam-A.hmm.gz"
+        gunzip_if_present "Pfam-A.hmm.gz"
+        run_indexer "pfam" hmmpress Pfam-A.hmm
+    fi
 
-    gunzip_if_present "Pfam-A.hmm.gz"
-    gunzip_if_present "Pfam-A.hmm.dat.gz"
-    run_indexer "pfam" hmmpress Pfam-A.hmm
+    if [[ "$DRY_RUN" -eq 1 ]] || ! file_nonempty Pfam-A.hmm.dat; then
+        download_optional "$PFAM_BASE/Pfam-A.hmm.dat.gz"
+        gunzip_if_present "Pfam-A.hmm.dat.gz"
+    fi
 
     # Local metadata placeholder matching existing structure
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -947,13 +992,30 @@ setup_tigrfam() {
     cmd mkdir -p "$DB_DIR/tigrfam"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/tigrfam"
 
-    download "$TIGRFAM_BASE/TIGRFAMs_15.0_HMM.LIB.gz"
-    download_optional "$TIGRFAM_BASE/TIGRFAMS_GO_LINK"
-    download_optional "$TIGRFAM_BASE/TIGRFAMS_ROLE_LINK"
-    download_optional "$PGAP_BASE/README.md"
+    if [[ "$DRY_RUN" -eq 0 ]] && file_nonempty TIGRFAMs_15.0_HMM.LIB; then
+        echo -e "${GREEN}  ✓ Reusing existing TIGRFAM HMM library (download skipped)${NC}"
+        if ! run_indexer "tigrfam" hmmpress TIGRFAMs_15.0_HMM.LIB; then
+            echo -e "${YELLOW}  ! Existing TIGRFAM files failed during hmmpress; re-downloading.${NC}"
+            rm -f TIGRFAMs_15.0_HMM.LIB TIGRFAMs_15.0_HMM.LIB.gz TIGRFAMs_15.0_HMM.LIB.h3f TIGRFAMs_15.0_HMM.LIB.h3i TIGRFAMs_15.0_HMM.LIB.h3m TIGRFAMs_15.0_HMM.LIB.h3p
+            download "$TIGRFAM_BASE/TIGRFAMs_15.0_HMM.LIB.gz"
+            gunzip_if_present "TIGRFAMs_15.0_HMM.LIB.gz"
+            run_indexer "tigrfam" hmmpress TIGRFAMs_15.0_HMM.LIB
+        fi
+    else
+        download "$TIGRFAM_BASE/TIGRFAMs_15.0_HMM.LIB.gz"
+        gunzip_if_present "TIGRFAMs_15.0_HMM.LIB.gz"
+        run_indexer "tigrfam" hmmpress TIGRFAMs_15.0_HMM.LIB
+    fi
 
-    gunzip_if_present "TIGRFAMs_15.0_HMM.LIB.gz"
-    run_indexer "tigrfam" hmmpress TIGRFAMs_15.0_HMM.LIB
+    if [[ "$DRY_RUN" -eq 1 || ! -f TIGRFAMS_GO_LINK ]]; then
+        download_optional "$TIGRFAM_BASE/TIGRFAMS_GO_LINK"
+    fi
+    if [[ "$DRY_RUN" -eq 1 || ! -f TIGRFAMS_ROLE_LINK ]]; then
+        download_optional "$TIGRFAM_BASE/TIGRFAMS_ROLE_LINK"
+    fi
+    if [[ "$DRY_RUN" -eq 1 || ! -f README.md ]]; then
+        download_optional "$PGAP_BASE/README.md"
+    fi
     echo -e "${GREEN}  ✓ TIGRfam database ready${NC}"
 }
 
@@ -1000,14 +1062,18 @@ setup_kegg() {
     cmd mkdir -p "$DB_DIR/kegg"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/kegg"
 
-    download_from_mirrors "profiles.tar.gz" \
-        "$KOFAM_BASE/profiles.tar.gz" \
-        "$KOFAM_FALLBACK_BASE/profiles.tar.gz"
-    download_from_mirrors "ko_list.gz" \
-        "$KOFAM_BASE/ko_list.gz" \
-        "$KOFAM_FALLBACK_BASE/ko_list.gz"
-    cmd tar -xzf profiles.tar.gz
-    gunzip_if_present ko_list.gz
+    if [[ "$DRY_RUN" -eq 0 && -d profiles ]] && file_nonempty ko_list; then
+        echo -e "${GREEN}  ✓ Reusing existing KOfam profiles and ko_list (download skipped)${NC}"
+    else
+        download_from_mirrors "profiles.tar.gz" \
+            "$KOFAM_BASE/profiles.tar.gz" \
+            "$KOFAM_FALLBACK_BASE/profiles.tar.gz"
+        download_from_mirrors "ko_list.gz" \
+            "$KOFAM_BASE/ko_list.gz" \
+            "$KOFAM_FALLBACK_BASE/ko_list.gz"
+        cmd tar -xzf profiles.tar.gz
+        gunzip_if_present ko_list.gz
+    fi
     echo -e "${GREEN}  ✓ KEGG database ready${NC}"
 }
 
@@ -1042,6 +1108,17 @@ setup_eggnog() {
         cmd tar -xzf eggnog.taxa.tar.gz
         echo -e "${GREEN}  ✓ EggNOG database ready${NC}"
         return 0
+    fi
+
+    if file_nonempty eggnog.db && file_nonempty eggnog_proteins.dmnd; then
+        if require_min_size_bytes "eggnog.db" 5000000000 "eggnog.db" \
+            && require_min_size_bytes "eggnog_proteins.dmnd" 3000000000 "eggnog_proteins.dmnd"; then
+            echo -e "${GREEN}  ✓ Reusing existing EggNOG DB assets (download skipped)${NC}"
+            echo -e "${GREEN}  ✓ EggNOG database ready${NC}"
+            return 0
+        fi
+        echo -e "${YELLOW}  ! Existing EggNOG assets look incomplete; re-downloading.${NC}"
+        rm -f eggnog.db eggnog_proteins.dmnd
     fi
 
     download "$EGGNOG_EMAPPER_BASE/eggnog.db.gz" "eggnog.db.gz"
@@ -1087,8 +1164,12 @@ setup_merops() {
     echo "  Source: $MEROPS_BASE"
     echo "  Method note: MEROPS papers describe BLAST/HMMER-based homologue discovery (Rawlings et al., 2014; 2018)."
 
-    download "$MEROPS_BASE/pepunit.lib"
-    download "$MEROPS_BASE/meropsscan.lib"
+    if [[ "$DRY_RUN" -eq 0 ]] && file_nonempty pepunit.lib && file_nonempty meropsscan.lib; then
+        echo -e "${GREEN}  ✓ Reusing existing MEROPS source files (download skipped)${NC}"
+    else
+        download "$MEROPS_BASE/pepunit.lib"
+        download "$MEROPS_BASE/meropsscan.lib"
+    fi
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
         cmd cp pepunit.lib pepunit_raw.lib
@@ -1102,7 +1183,15 @@ setup_merops() {
         cmd cp pepunit.lib pepunit_raw.lib
         sanitize_fasta_sequences pepunit_raw.lib pepunit.lib "MEROPS pepunit.lib" || return 1
         cmd cp pepunit.lib pepunit.txt
-        run_indexer "merops" diamond makedb --in pepunit.lib -d merops
+        if ! run_indexer "merops" diamond makedb --in pepunit.lib -d merops; then
+            echo -e "${YELLOW}  ! Existing MEROPS FASTA failed during DIAMOND indexing; re-downloading source files.${NC}"
+            rm -f pepunit.lib meropsscan.lib merops.dmnd
+            download "$MEROPS_BASE/pepunit.lib"
+            download "$MEROPS_BASE/meropsscan.lib"
+            cmd cp pepunit.lib pepunit_raw.lib
+            sanitize_fasta_sequences pepunit_raw.lib pepunit.lib "MEROPS pepunit.lib" || return 1
+            run_indexer "merops" diamond makedb --in pepunit.lib -d merops
+        fi
         if ! run_indexer "merops" hmmpress meropsscan.lib; then
             merops_hmmpress_ok=0
             echo -e "${YELLOW}  ! MEROPS HMMER index creation failed; continuing with DIAMOND index only.${NC}"
@@ -1135,10 +1224,16 @@ setup_tcdb() {
     echo "  Method note: Official local CLI path uses NCBI BLAST+ against TCDB FASTA (Saier et al., 2006; Saier et al., 2021)."
 
     # Primary link from provided document
-    download_optional "$TCDB_URL" "tcdb_download.html"
+    if [[ "$DRY_RUN" -eq 1 || ! -f tcdb_download.html ]]; then
+        download_optional "$TCDB_URL" "tcdb_download.html"
+    fi
 
     # Direct FASTA location used by existing workflows
-    download "https://www.tcdb.org/public/tcdb" "tcdb.fasta"
+    if [[ "$DRY_RUN" -eq 0 ]] && is_fasta_like tcdb.fasta; then
+        echo -e "${GREEN}  ✓ Reusing existing TCDB FASTA (download skipped)${NC}"
+    else
+        download "https://www.tcdb.org/public/tcdb" "tcdb.fasta"
+    fi
     if [[ "$DRY_RUN" -eq 1 ]]; then
         cmd makeblastdb -in tcdb.fasta -dbtype prot -out tcdb_blast
         echo -e "${GREEN}  ✓ TCDB database ready${NC}"
@@ -1157,7 +1252,14 @@ setup_tcdb() {
     fi
 
     # Official local CLI-style annotation path: NCBI BLAST+ against TCDB FASTA
-    run_indexer "tcdb" makeblastdb -in tcdb.fasta -dbtype prot -out tcdb_blast
+    if blast_index_ready tcdb_blast; then
+        echo -e "${GREEN}  ✓ Reusing existing TCDB BLAST index (formatting skipped)${NC}"
+    elif ! run_indexer "tcdb" makeblastdb -in tcdb.fasta -dbtype prot -out tcdb_blast; then
+        echo -e "${YELLOW}  ! Existing TCDB FASTA failed during BLAST formatting; re-downloading.${NC}"
+        rm -f tcdb.fasta tcdb_blast.p* tcdb_blast.n* tcdb_blast.*
+        download "https://www.tcdb.org/public/tcdb" "tcdb.fasta"
+        run_indexer "tcdb" makeblastdb -in tcdb.fasta -dbtype prot -out tcdb_blast
+    fi
     echo -e "${GREEN}  ✓ TCDB database ready${NC}"
 }
 
@@ -1167,9 +1269,22 @@ setup_uniprot() {
     cmd mkdir -p "$DB_DIR/uniprot"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/uniprot"
 
-    download "$UNIPROT_SPROT_URL"
-    gunzip_if_present uniprot_sprot.fasta.gz
-    run_indexer "uniprot" diamond makedb --in uniprot_sprot.fasta -d uniprot_sprot
+    if [[ "$DRY_RUN" -eq 0 ]] && is_fasta_like uniprot_sprot.fasta; then
+        echo -e "${GREEN}  ✓ Reusing existing UniProt FASTA (download skipped)${NC}"
+    else
+        download "$UNIPROT_SPROT_URL"
+        gunzip_if_present uniprot_sprot.fasta.gz
+    fi
+
+    if diamond_index_ready uniprot_sprot; then
+        echo -e "${GREEN}  ✓ Reusing existing UniProt DIAMOND index (formatting skipped)${NC}"
+    elif ! run_indexer "uniprot" diamond makedb --in uniprot_sprot.fasta -d uniprot_sprot; then
+        echo -e "${YELLOW}  ! Existing UniProt FASTA failed during DIAMOND formatting; re-downloading.${NC}"
+        rm -f uniprot_sprot.fasta uniprot_sprot.fasta.gz uniprot_sprot.dmnd
+        download "$UNIPROT_SPROT_URL"
+        gunzip_if_present uniprot_sprot.fasta.gz
+        run_indexer "uniprot" diamond makedb --in uniprot_sprot.fasta -d uniprot_sprot
+    fi
     echo "  Using official Swiss-Prot resources for UPIMAPI-backed annotation."
     echo -e "${GREEN}  ✓ UniProt Swiss-Prot database ready${NC}"
 }
@@ -1181,20 +1296,28 @@ setup_interpro() {
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/interpro"
 
     # Signature mapping used by existing workflows
-    download_optional "$INTERPRO_BASE/current_release/entry.list"
-    download_optional "$INTERPRO_BASE/current_release/interpro2go"
-    download_optional "$INTERPRO_BASE/current_release/signature_to_ipr.dat.gz"
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        cmd gunzip -kf signature_to_ipr.dat.gz
-        cmd cp signature_to_ipr.dat signature_to_ipr.tsv
-    elif [[ -f signature_to_ipr.dat.gz ]]; then
-        gunzip_if_present signature_to_ipr.dat.gz
-        cp signature_to_ipr.dat signature_to_ipr.tsv || true
+    if [[ "$DRY_RUN" -eq 0 ]] && { file_nonempty signature_to_ipr.tsv || file_nonempty signature_to_ipr.dat; }; then
+        echo -e "${GREEN}  ✓ Reusing existing InterPro signature mappings (download skipped)${NC}"
+    else
+        download_optional "$INTERPRO_BASE/current_release/entry.list"
+        download_optional "$INTERPRO_BASE/current_release/interpro2go"
+        download_optional "$INTERPRO_BASE/current_release/signature_to_ipr.dat.gz"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            cmd gunzip -kf signature_to_ipr.dat.gz
+            cmd cp signature_to_ipr.dat signature_to_ipr.tsv
+        elif [[ -f signature_to_ipr.dat.gz ]]; then
+            gunzip_if_present signature_to_ipr.dat.gz
+            cp signature_to_ipr.dat signature_to_ipr.tsv || true
+        fi
     fi
 
     # InterProScan data bundle (large; optional because users may run Nextflow install)
-    download_optional "$INTERPRO_BASE/interproscan/5/interproscan-data-5.77-108.0.tar.gz"
-    download_optional "$INTERPRO_BASE/interproscan/5/interproscan-data-5.77-108.0.tar.gz.md5"
+    if [[ "$DRY_RUN" -eq 1 || ! -f interproscan-data-5.77-108.0.tar.gz ]]; then
+        download_optional "$INTERPRO_BASE/interproscan/5/interproscan-data-5.77-108.0.tar.gz"
+    fi
+    if [[ "$DRY_RUN" -eq 1 || ! -f interproscan-data-5.77-108.0.tar.gz.md5 ]]; then
+        download_optional "$INTERPRO_BASE/interproscan/5/interproscan-data-5.77-108.0.tar.gz.md5"
+    fi
 
     echo -e "${GREEN}  ✓ InterPro setup complete${NC}"
 }
