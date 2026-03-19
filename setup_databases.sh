@@ -929,6 +929,17 @@ setup_cog() {
         && file_nonempty cddid.tbl.gz \
         && file_nonempty Cog_LE.tar.gz; then
         echo -e "${GREEN}  ✓ Reusing existing COG files (download skipped)${NC}"
+        if [[ ! -f COG.dmnd ]]; then
+            if [[ ! -f COGorg24.faa ]]; then
+                download_optional "$COG_BASE/COGorg24.faa.gz"
+                gunzip_if_present "COGorg24.faa.gz"
+            fi
+            if [[ -f COGorg24.faa ]]; then
+                run_indexer "cog" diamond makedb --in COGorg24.faa -d COG
+            else
+                echo -e "${YELLOW}  ! COGorg24.faa unavailable; COG.dmnd was not rebuilt.${NC}"
+            fi
+        fi
         echo "  COGclassifier will use these local resources via --download_dir db/cog."
         echo -e "${GREEN}  ✓ COG database ready${NC}"
         return 0
@@ -946,6 +957,15 @@ setup_cog() {
     download_optional "$COG_BASE/cog-24.org.csv"
     download_optional "$COG_BASE/cog-24.pathways.tab"
     download_optional "$COG_BASE/cog-24.tax.csv"
+
+    # Compatibility artifact used by some downstream wrappers.
+    if [[ "$DRY_RUN" -eq 1 || ! -f COG.dmnd ]]; then
+        download_optional "$COG_BASE/COGorg24.faa.gz"
+        gunzip_if_present "COGorg24.faa.gz"
+        if [[ "$DRY_RUN" -eq 1 || -f COGorg24.faa ]]; then
+            run_indexer "cog" diamond makedb --in COGorg24.faa -d COG
+        fi
+    fi
 
     echo "  COGclassifier will use these local resources via --download_dir db/cog."
     echo -e "${GREEN}  ✓ COG database ready${NC}"
@@ -1031,6 +1051,9 @@ setup_dbcan() {
         if dbcan_assets_ready; then
             existing_hmm_db="$(dbcan_pick_hmm_db || true)"
             dbcan_try_press_if_missing "$existing_hmm_db"
+            if [[ ! -f dbCAN.txt && -f dbCAN-HMMdb-V14.txt ]]; then
+                cp dbCAN-HMMdb-V14.txt dbCAN.txt
+            fi
             echo -e "${GREEN}  ✓ Reusing existing dbCAN/CAZy assets from $DB_DIR/dbcan (download skipped)${NC}"
             echo -e "${GREEN}  ✓ dbCAN database ready${NC}"
             return 0
@@ -1259,6 +1282,13 @@ setup_tcdb() {
         rm -f tcdb.fasta tcdb_blast.p* tcdb_blast.n* tcdb_blast.*
         download "https://www.tcdb.org/public/tcdb" "tcdb.fasta"
         run_indexer "tcdb" makeblastdb -in tcdb.fasta -dbtype prot -out tcdb_blast
+    fi
+
+    # Compatibility artifact used by DIAMOND-based TCDB wrappers.
+    if diamond_index_ready tcdb; then
+        echo -e "${GREEN}  ✓ Reusing existing TCDB DIAMOND index (formatting skipped)${NC}"
+    else
+        run_indexer "tcdb" diamond makedb --in tcdb.fasta -d tcdb
     fi
     echo -e "${GREEN}  ✓ TCDB database ready${NC}"
 }
