@@ -696,11 +696,13 @@ pull_official_operon() {
 
         if docker image inspect "$OFFICIAL_OPERON_IMAGE" >/dev/null 2>&1; then
             echo -e "${YELLOW}  ! Docker image already exists: $OFFICIAL_OPERON_IMAGE (skipping)${NC}"
+            docker tag "$OFFICIAL_OPERON_IMAGE" "operon-annotation:1.0" 2>/dev/null || true
             ((BUILT++)) || true
             return 0
         fi
 
         if docker pull --platform "$DOCKER_PLATFORM_RESOLVED" "$OFFICIAL_OPERON_IMAGE"; then
+            docker tag "$OFFICIAL_OPERON_IMAGE" "operon-annotation:1.0" 2>/dev/null || true
             echo -e "${GREEN}  ✓ $OFFICIAL_OPERON_IMAGE${NC}"
             ((BUILT++)) || true
             return 0

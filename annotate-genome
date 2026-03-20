@@ -1912,6 +1912,16 @@ run_interactive() {
         for f in "${will_run_i[@]}"; do run_annotation_for_genome "$f"; done
     fi
 
+    if [[ "$RUN_SYNTENY" -eq 1 ]]; then
+        echo -e "  ${CYAN}[run]  synteny (post-batch)${NC}"
+        if [[ "$DRY_RUN_PIPELINE" -eq 0 ]]; then
+            run_synteny_for_existing_consolidated || \
+                echo -e "    ${YELLOW}[warn] Synteny workflow encountered errors.${NC}"
+        else
+            echo "    → run_mcscanx_workflow.sh --rasttk-dir $OUTPUT_DIR/rasttk --consolidated-dir $OUTPUT_DIR/consolidation --outdir $OUTPUT_DIR/synteny"
+        fi
+    fi
+
     echo ""
     echo -e "${GREEN}${BOLD}  ✔  Annotation complete!${NC}"
     echo "     Results in: $OUTPUT_DIR"
