@@ -407,7 +407,7 @@ run_indexer() {
     if [[ "$RUNTIME" == "docker" ]]; then
         if [[ -n "$image" ]] && docker image inspect "$image" >/dev/null 2>&1; then
             echo -e "${YELLOW}  ! Host $1 missing, using Docker image ${image} for indexing.${NC}"
-            if ! docker run --rm --platform "$docker_platform" "$image" /bin/sh -lc "command -v '$1' >/dev/null 2>&1"; then
+            if ! docker run --rm --platform "$docker_platform" "$image" /bin/sh -c "command -v '$1' >/dev/null 2>&1"; then
                 warn_missing_indexer "$1" "$db_name"
                 return 0
             fi
@@ -419,7 +419,9 @@ run_indexer() {
     elif [[ "$RUNTIME" == "apptainer" || "$RUNTIME" == "singularity" ]]; then
         if [[ -f "$sif" ]]; then
             echo -e "${YELLOW}  ! Host $1 missing, using ${RUNTIME} image ${sif} for indexing.${NC}"
-            if ! "$RUNTIME" exec --bind "$DB_DIR:/db" --pwd "/db/${db_name}" "$sif" /bin/sh -lc "command -v '$1' >/dev/null 2>&1"; then
+            # Use /bin/sh -c (not -lc) to avoid the host's login profile overriding the
+            # container's %environment PATH (which includes /opt/conda/bin for conda tools).
+            if ! "$RUNTIME" exec --bind "$DB_DIR:/db" --pwd "/db/${db_name}" "$sif" /bin/sh -c "command -v '$1' >/dev/null 2>&1"; then
                 warn_missing_indexer "$1" "$db_name"
                 return 0
             fi

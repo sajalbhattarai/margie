@@ -89,13 +89,15 @@ fi
 
 # Run eggnog-mapper
 # -i: input FASTA file
-# --output: output file prefix  
+# --output: output file prefix
 # --output_dir: output directory
 # --data_dir: database directory
 # --cpu: number of threads
 # -m: search mode (diamond is default and recommended)
 # --override: overwrite existing files
-emapper.py \
+# PYTHONUNBUFFERED=1 ensures Python flushes stdout in real-time so progress
+# is visible live rather than only appearing after the run completes.
+PYTHONUNBUFFERED=1 emapper.py \
     -i "$INPUT_FAA" \
     --output "${ORGANISM_NAME}" \
     --output_dir "$NATIVE_DIR" \

@@ -43,7 +43,7 @@ CONTAINERS=(
 OFFICIAL_DBCAN_IMAGE="haidyi/run_dbcan:latest"
 OFFICIAL_EGGNOG_IMAGE="quay.io/biocontainers/eggnog-mapper:2.1.12--pyhdfd78af_0"
 OFFICIAL_EGGNOG_PLATFORM="linux/amd64"
-OFFICIAL_OPERON_IMAGE="ghcr.io/sajalbhattarai/for_oprn:latest"
+OFFICIAL_OPERON_IMAGE="ghcr.io/sajalbhattarai/opr-dev:latest"
 
 # Optional prebuilt images hosted in GitHub Container Registry (GHCR).
 # These can be overridden via environment variables for forks/custom orgs.

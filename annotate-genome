@@ -122,6 +122,9 @@ ${BOLD}ANNOTATION CONTROL${NC}
     --only-prodigal     RASTtk fast mode: skip steps 2-7 and Glimmer step.
     --only-prodigal-and-glimmer
                                             RASTtk fast mode: skip steps 2-7, keep Glimmer step.
+    --no-seed           RASTtk mode: Prodigal gene calling only, skip all SEED
+                                            database lookups and variant-definition enrichment.
+                                            Produces a lean rast.tsv without SEED/variant columns.
 
 ${BOLD}COMPUTING RESOURCES${NC}
   --nodes N, -N N     Total CPU cores available to the pipeline.
@@ -983,6 +986,25 @@ run_annotation_tool_direct() {
             run_tool_container tcdb "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:rw" \
                 env INPUT_FAA="/container/input/$(basename "$protein_faa")" OUTPUT_DIR="/container/output" THREADS="$(effective_threads)" bash /container/scripts/run_blast.sh ;;
         uniprot)
+            # UPIMAPI cannot write inside a read-only container mount.
+            # Pre-build the DIAMOND index on the host using the container before
+            # mounting the db directory as :ro for the actual annotation run.
+            if [[ ! -f "$db_dir/uniprot_sprot.dmnd" && -f "$db_dir/uniprot_sprot.fasta" ]]; then
+                local _runtime _sif
+                _runtime="$(resolve_runtime_for_tool uniprot)" || _runtime=""
+                _sif="$CONTAINERS_DIR/uniprot/uniprot.sif"
+                if [[ "$_runtime" == "docker" ]]; then
+                    echo -e "  ${YELLOW}[uniprot] Building DIAMOND index via Docker container...${NC}"
+                    docker run --rm --platform "$(tool_docker_platform uniprot)" \
+                        -v "$db_dir:/db" -w /db \
+                        "$(tool_docker_image uniprot)" \
+                        /bin/sh -c "diamond makedb --in /db/uniprot_sprot.fasta -d /db/uniprot_sprot" || true
+                elif [[ -f "$_sif" ]]; then
+                    echo -e "  ${YELLOW}[uniprot] Building DIAMOND index via apptainer container...${NC}"
+                    "$_runtime" exec --bind "$db_dir:/db" --pwd /db "$_sif" \
+                        diamond makedb --in /db/uniprot_sprot.fasta -d /db/uniprot_sprot || true
+                fi
+            fi
             run_tool_container uniprot "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
                 bash /container/scripts/run_upimapi.sh "/container/input/$(basename "$protein_faa")" "/container/output/uniprot_hits.tsv" "/container/db/uniprot_sprot.fasta" "$(effective_threads)" ;;
         interpro)
@@ -1876,13 +1898,15 @@ run_interactive() {
     if [[ "$DB_SELECTION" == "all" || ",$DB_SELECTION," == *",rasttk,"* ]]; then
         echo ""
         echo "  RASTtk run mode:"
-        echo "    1) full (all incremental steps)"
+        echo "    1) full (all incremental steps + SEED enrichment)"
         echo "    2) only-prodigal (skip steps 2-7 and glimmer)"
         echo "    3) only-prodigal-and-glimmer (skip steps 2-7)"
-        read -r -p "  Choice [1-3, default 1]: " rasttk_mode_choice
+        echo "    4) no-seed (Prodigal only, skip ALL SEED enrichment)"
+        read -r -p "  Choice [1-4, default 1]: " rasttk_mode_choice
         case "${rasttk_mode_choice:-1}" in
             2) RASTTK_RUN_MODE="only-prodigal" ;;
             3) RASTTK_RUN_MODE="only-prodigal-and-glimmer" ;;
+            4) RASTTK_RUN_MODE="no-seed" ;;
             *) RASTTK_RUN_MODE="full" ;;
         esac
     fi
@@ -2071,6 +2095,7 @@ while [[ $# -gt 0 ]]; do
         --only-prodigal)   RASTTK_RUN_MODE="only-prodigal"; shift ;;
         --only-prodigal-and-glimmer)
                    RASTTK_RUN_MODE="only-prodigal-and-glimmer"; shift ;;
+        --no-seed)         RASTTK_RUN_MODE="no-seed"; shift ;;
         --dry-run)         DRY_RUN_PIPELINE=1;   shift ;;
         -h|--help)         show_usage; exit 0 ;;
 

@@ -8,12 +8,12 @@ Parses HMMER domtblout format and creates consolidated TSV with:
 - Confidence scoring based on E-value, coverage, and bit score
 - Genome Properties mapping for pathway/system context
 
-Output columns (31):
+Output columns (16):
   1. organism
   2. feature_id
   3. protein_length
-  4. domain_number
-  5. TIGRFAM_family
+  4. TIGRFAM_domain_count
+  5. TIGRFAM_accession
   6. TIGRFAM_description
   7. TIGRFAM_isotype
   8. TIGRFAM_tlen
@@ -315,29 +315,33 @@ def main():
     # Write output TSV (one row per protein, semicolon-separated domains)
     with open(output_file, 'w') as out:
         # Header
+        # In TIGRfam HMM files the NAME and ACC fields are both the TIGR ID
+        # (e.g. TIGR00006), so storing both produced redundant accession numbers
+        # in the old TIGRFAM_id and TIGRFAM_family columns.  The new layout uses
+        # a single TIGRFAM_accession column for the TIGR ID and
+        # TIGRFAM_description for the human-readable function name.
         header = [
             'organism', 'feature_id', 'protein_length', 'TIGRFAM_domain_count',
-            'TIGRFAM_id', 'TIGRFAM_family', 'TIGRFAM_description', 'TIGRFAM_isotype',
+            'TIGRFAM_accession', 'TIGRFAM_description', 'TIGRFAM_isotype',
             'TIGRFAM_hmm_coords', 'TIGRFAM_ali_coords', 'TIGRFAM_env_coords',
             'TIGRFAM_full_evalue', 'TIGRFAM_full_score',
             'TIGRFAM_domain_ievalue', 'TIGRFAM_domain_score',
             'TIGRFAM_genprop_ids', 'TIGRFAM_genprop_names'
         ]
         out.write('\t'.join(header) + '\n')
-        
+
         # Write domains
         total_domains = 0
         unique_families = set()
-        
+
         for protein_id in sorted(protein_domains.keys()):
             domains = protein_domains[protein_id]
-            
+
             # Sort domains by position
             domains.sort(key=lambda d: d['env_from'])
-            
+
             # Collect all domain values
-            ids = []
-            families = []
+            accessions = []
             descriptions = []
             isotypes = []
             hmm_coords = []
@@ -349,15 +353,16 @@ def main():
             domain_scores = []
             all_genprop_ids = []
             all_genprop_names = []
-            
+
             protein_length = domains[0]['protein_length'] if domains else 0
-            
+
             for domain in domains:
                 total_domains += 1
                 unique_families.add(domain['family'])
-                
-                ids.append(domain['acc'])
-                families.append(domain['family'])
+
+                # Use 'family' (target name) as the canonical TIGR accession;
+                # 'acc' (fields[1]) is identical for TIGRfam HMMs.
+                accessions.append(domain['family'])
                 descriptions.append(domain['description'] if domain['description'] else 'N/A')
                 isotypes.append(domain['isotype'] if domain['isotype'] else 'N/A')
                 hmm_coords.append(f"{domain['hmm_from']}-{domain['hmm_to']}")
@@ -369,14 +374,13 @@ def main():
                 domain_scores.append(f"{domain['dom_score']:.1f}")
                 all_genprop_ids.append(domain['genprop_ids'] if domain['genprop_ids'] else 'N/A')
                 all_genprop_names.append(domain['genprop_names'] if domain['genprop_names'] else 'N/A')
-            
+
             row = [
                 genome_name,
                 protein_id,
                 str(protein_length),
                 str(len(domains)),
-                ';'.join(ids),
-                ';'.join(families),
+                ';'.join(accessions),
                 ';'.join(descriptions),
                 ';'.join(isotypes),
                 ';'.join(hmm_coords),

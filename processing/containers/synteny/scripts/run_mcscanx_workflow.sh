@@ -381,12 +381,98 @@ python3 /container/scripts/render_synteny_plots.py \
     log "WARNING: Plot rendering failed"
   }
 
+SUMMARY_TSV="$OUTDIR/synteny_summary.tsv"
+
+# Generate a plain-language per-block summary TSV that is easy to read without
+# needing to understand MCScanX internals.  Reads synteny_gene_pairs.tsv (and
+# optionally the detailed/annotated version) and collapses each block into one
+# row with human-readable columns.
+if [[ -f "$PAIRS_TSV" ]]; then
+  log "Generating human-readable block summary: $SUMMARY_TSV"
+  python3 - <<'PYEOF' "$PAIRS_TSV" "${PAIRS_DETAILED_TSV:-}" "${ANNOTATION_JOIN_TSV:-}" "$SUMMARY_TSV"
+import sys, csv
+
+pairs_file   = sys.argv[1]
+detailed_file = sys.argv[2] if len(sys.argv) > 2 else ""
+annot_file   = sys.argv[3] if len(sys.argv) > 3 else ""
+out_file     = sys.argv[4]
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+def genome_from_gene(gene_id):
+    """Derive genome label from prefixed gene ID (genome_contig_... convention)."""
+    return gene_id.split("_")[0] if "_" in gene_id else gene_id
+
+def load_annotation(annot_file):
+    """Return dict gene_id -> {'description': ..., 'genome': ...}."""
+    ann = {}
+    if not annot_file:
+        return ann
+    try:
+        with open(annot_file) as fh:
+            rdr = csv.DictReader(fh, delimiter="\t")
+            for row in rdr:
+                for col in ("gene_a", "gene_b"):
+                    gid = row.get(col, "")
+                    if gid and gid not in ann:
+                        # try common description column names
+                        desc = (row.get("RAST_description_" + col[-1], "") or
+                                row.get("description_" + col[-1], "") or
+                                row.get("function_" + col[-1], ""))
+                        ann[gid] = desc
+    except Exception:
+        pass
+    return ann
+
+# ── load pairs ───────────────────────────────────────────────────────────────
+blocks = {}   # block_id -> {genome_a, genome_b, pairs: [(a,b,eval)]}
+ann = load_annotation(annot_file)
+
+with open(pairs_file) as fh:
+    rdr = csv.DictReader(fh, delimiter="\t")
+    for row in rdr:
+        bid  = row.get("block_id", "?")
+        ga   = row.get("gene_a", "")
+        gb   = row.get("gene_b", "")
+        ev   = row.get("anchor_evalue", "")
+        if bid not in blocks:
+            blocks[bid] = {"genome_a": genome_from_gene(ga),
+                           "genome_b": genome_from_gene(gb),
+                           "pairs": []}
+        blocks[bid]["pairs"].append((ga, gb, ev))
+
+# ── write summary ─────────────────────────────────────────────────────────────
+with open(out_file, "w", newline="") as fh:
+    w = csv.writer(fh, delimiter="\t")
+    w.writerow([
+        "block_id", "genome_a", "genome_b", "block_size",
+        "best_evalue", "genes_a", "genes_b",
+        "descriptions_a", "descriptions_b",
+    ])
+    for bid, blk in sorted(blocks.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+        pairs = blk["pairs"]
+        genes_a   = ";".join(p[0] for p in pairs)
+        genes_b   = ";".join(p[1] for p in pairs)
+        evalues   = [p[2] for p in pairs if p[2] not in ("", "NA")]
+        best_eval = min(evalues, key=lambda e: float(e) if e.replace("e","").replace("-","").replace(".","").isdigit() else 1) if evalues else ""
+        desc_a    = ";".join(ann.get(p[0], "") for p in pairs)
+        desc_b    = ";".join(ann.get(p[1], "") for p in pairs)
+        w.writerow([bid, blk["genome_a"], blk["genome_b"],
+                    len(pairs), best_eval, genes_a, genes_b,
+                    desc_a, desc_b])
+
+print(f"Wrote {len(blocks)} synteny blocks to {out_file}")
+PYEOF
+else
+  log "WARNING: synteny_gene_pairs.tsv not found; skipping summary generation"
+fi
+
 log "Workflow complete"
 log "Main outputs:"
+log "  $SUMMARY_TSV                  ← start here: one row per synteny block"
+log "  $PAIRS_TSV"
 log "  $MC_GFF"
 log "  $MC_BLAST"
 log "  $COLLINEARITY"
-log "  $PAIRS_TSV"
 [[ -f "$PAIRS_DETAILED_TSV" ]] && log "  $PAIRS_DETAILED_TSV"
 [[ -f "$ANNOTATION_JOIN_TSV" ]] && log "  $ANNOTATION_JOIN_TSV"
 [[ -f "$PROCESSED_DIR/synteny_block_sizes.png" ]] && log "  $PROCESSED_DIR/synteny_block_sizes.png"

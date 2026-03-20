@@ -296,7 +296,7 @@ def load_tsv_data(tsv_file: str) -> List[List[str]]:
     return data
 
 
-def consolidate_rast_annotations(rast_dir: str, organism_name: str, output_file: str):
+def consolidate_rast_annotations(rast_dir: str, organism_name: str, output_file: str, no_seed: bool = False):
     """
     Consolidate all RASTtk outputs into a single rast.tsv file with complete SEED enrichment.
     """
@@ -338,34 +338,36 @@ def consolidate_rast_annotations(rast_dir: str, organism_name: str, output_file:
     
     # Load subsystem mapping (role -> subsystem hierarchy)
     role_to_subsystems = {}
-    if mapping_file:
+    if no_seed:
+        print("--no-seed mode: skipping SEED subsystem and variant-definition enrichment.")
+    elif mapping_file:
         role_to_subsystems = load_subsystem_mapping(mapping_file)
     else:
         print("No subsystem mapping file found. Proceeding without enrichment.")
-    
+
     # Load SEED variant data
     subsystem_metadata = {}
     variant_roles = {}
     subsystem_variants = {}
-    
-    if variant_defs_dir and os.path.exists(variant_defs_dir):
+
+    if not no_seed and variant_defs_dir and os.path.exists(variant_defs_dir):
         print("Loading SEED variant definitions...")
-        
+
         metadata_file = os.path.join(variant_defs_dir, 'local_references', 'subsystem_metadata.tsv')
         if os.path.exists(metadata_file):
             subsystem_metadata = load_subsystem_metadata(metadata_file)
             print(f"  Loaded metadata for {len(subsystem_metadata)} subsystems")
-        
+
         roles_file = os.path.join(variant_defs_dir, 'structured_database', 'tsv_tables', 'variant_roles.tsv')
         if os.path.exists(roles_file):
             variant_roles = load_variant_roles_mapping(roles_file)
             print(f"  Loaded role assignments for {len(variant_roles)} variants")
-        
+
         variants_file = os.path.join(variant_defs_dir, 'structured_database', 'tsv_tables', 'subsystem_variants.tsv')
         if os.path.exists(variants_file):
             subsystem_variants = load_subsystem_variants(variants_file)
             print(f"  Loaded {len(subsystem_variants)} variant definitions")
-    else:
+    elif not no_seed:
         print("SEED variant definitions not found. Will only include basic subsystem info.")
 
     # -------------------------------------------------------------------------
@@ -539,39 +541,63 @@ def consolidate_rast_annotations(rast_dir: str, organism_name: str, output_file:
     n_rna = process_features(rna_file)
     n_prophage = process_features(prophage_file, feature_type_override='prophage')
     
+    # In no-seed mode, strip the SEED-specific columns (indices 16-26) from each row.
+    if no_seed:
+        # Columns 0-15 are always present; 16-26 are SEED enrichment.
+        all_rows = [row[:16] for row in all_rows]
+
     # Write output file
     print(f"\nWriting consolidated output to {output_file}...")
     with open(output_file, 'w', newline='') as f:
-        # Write header with all columns
-        header = [
-            'organism',
-            'feature_id',
-            'gene_id',
-            'gene_start',
-            'gene_end',
-            'na_length',
-            'aa_length',
-            'na_seq',
-            'aa_seq',
-            'RAST_feature_type',
-            'RAST_description',
-            'RAST_EC_numbers',
-            'RAST_strand',
-            'RAST_feature_hash',
-            'RAST_source_file',
-            'RAST_genecaller_raw_row',
-            'RAST_Subsystem_Superclass',
-            'RAST_Subsystem_Class',
-            'RAST_Subsystem_Subclass',
-            'RAST_Subsystem_Name',
-            'SEED_variant_number',
-            'SEED_variant_definition',
-            'SEED_curator',
-            'SEED_description',
-            'SEED_notes',
-            'SEED_version',
-            'SEED_subsystem_notes'
-        ]
+        if no_seed:
+            header = [
+                'organism',
+                'feature_id',
+                'gene_id',
+                'gene_start',
+                'gene_end',
+                'na_length',
+                'aa_length',
+                'na_seq',
+                'aa_seq',
+                'RAST_feature_type',
+                'RAST_description',
+                'RAST_EC_numbers',
+                'RAST_strand',
+                'RAST_feature_hash',
+                'RAST_source_file',
+                'RAST_genecaller_raw_row',
+            ]
+        else:
+            header = [
+                'organism',
+                'feature_id',
+                'gene_id',
+                'gene_start',
+                'gene_end',
+                'na_length',
+                'aa_length',
+                'na_seq',
+                'aa_seq',
+                'RAST_feature_type',
+                'RAST_description',
+                'RAST_EC_numbers',
+                'RAST_strand',
+                'RAST_feature_hash',
+                'RAST_source_file',
+                'RAST_genecaller_raw_row',
+                'RAST_Subsystem_Superclass',
+                'RAST_Subsystem_Class',
+                'RAST_Subsystem_Subclass',
+                'RAST_Subsystem_Name',
+                'SEED_variant_number',
+                'SEED_variant_definition',
+                'SEED_curator',
+                'SEED_description',
+                'SEED_notes',
+                'SEED_version',
+                'SEED_subsystem_notes',
+            ]
         writer = csv.writer(f, delimiter='\t')
         writer.writerow(header)
         writer.writerows(all_rows)
@@ -584,19 +610,23 @@ def consolidate_rast_annotations(rast_dir: str, organism_name: str, output_file:
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python consolidate_rast_output.py <rast_output_dir> <organism_name>", file=sys.stderr)
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    no_seed = '--no-seed' in sys.argv
+
+    if len(args) != 2:
+        print("Usage: python generate_rast_tsv.py <rast_output_dir> <organism_name> [--no-seed]", file=sys.stderr)
         print("\nExample:", file=sys.stderr)
-        print('  python consolidate_rast_output.py output/rasttk/theta "Bacteroides thetaiotaomicron"', file=sys.stderr)
+        print('  python generate_rast_tsv.py output/rasttk/theta "Bacteroides thetaiotaomicron"', file=sys.stderr)
+        print('  python generate_rast_tsv.py output/rasttk/theta "Bacteroides thetaiotaomicron" --no-seed', file=sys.stderr)
         sys.exit(1)
-    
-    rast_dir = sys.argv[1]
-    organism_name = sys.argv[2]
-    
+
+    rast_dir = args[0]
+    organism_name = args[1]
+
     # Output file in same directory as input
     output_file = os.path.join(rast_dir, 'rast.tsv')
-    
-    consolidate_rast_annotations(rast_dir, organism_name, output_file)
+
+    consolidate_rast_annotations(rast_dir, organism_name, output_file, no_seed=no_seed)
 
 
 if __name__ == '__main__':

@@ -28,9 +28,9 @@ echo "Run mode: $RUN_MODE"
 echo ""
 
 case "$RUN_MODE" in
-    full|only-prodigal|only-prodigal-and-glimmer) ;;
+    full|only-prodigal|only-prodigal-and-glimmer|no-seed) ;;
     *)
-        echo "Error: Unsupported RUN_MODE '$RUN_MODE'. Use: full | only-prodigal | only-prodigal-and-glimmer"
+        echo "Error: Unsupported RUN_MODE '$RUN_MODE'. Use: full | only-prodigal | only-prodigal-and-glimmer | no-seed"
         exit 1
         ;;
 esac
@@ -55,7 +55,7 @@ echo ""
 
 # Step 2: Call rRNA genes
 echo "=== [2/15] Calling rRNA genes ==="
-if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.1" "$OUTPUT_DIR/${GENOME_NAME}.gto.2"
     echo "⚠ Skipped in fast mode"
 else
@@ -68,7 +68,7 @@ echo ""
 
 # Step 3: Call tRNA genes
 echo "=== [3/15] Calling tRNA genes ==="
-if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.2" "$OUTPUT_DIR/${GENOME_NAME}.gto.3"
     echo "⚠ Skipped in fast mode"
 else
@@ -81,7 +81,7 @@ echo ""
 
 # Step 4: Call repeat regions
 echo "=== [4/15] Calling repeat regions ==="
-if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.3" "$OUTPUT_DIR/${GENOME_NAME}.gto.4"
     echo "⚠ Skipped in fast mode"
 else
@@ -94,7 +94,7 @@ echo ""
 
 # Step 5: Call selenoproteins
 echo "=== [5/15] Calling selenoproteins ==="
-if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.4" "$OUTPUT_DIR/${GENOME_NAME}.gto.5"
     echo "⚠ Skipped in fast mode"
 else
@@ -107,7 +107,7 @@ echo ""
 
 # Step 6: Call pyrrolysoproteins
 echo "=== [6/15] Calling pyrrolysoproteins ==="
-if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.5" "$OUTPUT_DIR/${GENOME_NAME}.gto.6"
     echo "⚠ Skipped in fast mode"
 else
@@ -120,7 +120,7 @@ echo ""
 
 # Step 7: Call CRISPRs
 echo "=== [7/15] Calling CRISPR elements ==="
-if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "only-prodigal-and-glimmer" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.6" "$OUTPUT_DIR/${GENOME_NAME}.gto.7"
     echo "⚠ Skipped in fast mode"
 else
@@ -141,9 +141,9 @@ echo ""
 
 # Step 9: Call protein-encoding genes with Glimmer3
 echo "=== [9/15] Calling protein-encoding genes (Glimmer3) ==="
-if [ "$RUN_MODE" = "only-prodigal" ]; then
+if [ "$RUN_MODE" = "only-prodigal" ] || [ "$RUN_MODE" = "no-seed" ]; then
     cp "$OUTPUT_DIR/${GENOME_NAME}.gto.8" "$OUTPUT_DIR/${GENOME_NAME}.gto.9"
-    echo "⚠ Glimmer3 skipped in only-prodigal mode"
+    echo "⚠ Glimmer3 skipped in only-prodigal/no-seed mode"
 else
     $BVBRC rast-call-features-CDS-glimmer3 \
         < "$OUTPUT_DIR/${GENOME_NAME}.gto.8" \
@@ -348,10 +348,16 @@ mv "$OUTPUT_DIR/${GENOME_NAME}.gto."* "$OUTPUT_DIR/native/"
 mv "$OUTPUT_DIR/${GENOME_NAME}_summary.txt" "$OUTPUT_DIR/native/"
 echo "✓ Moved native RAST outputs to native/"
 
-# Consolidate outputs into rast.tsv for downstream annotation with full SEED enrichment
+# Consolidate outputs into rast.tsv for downstream annotation.
+# In no-seed mode, skip SEED variant-definition enrichment so the output
+# contains only the Prodigal gene calls and basic feature data.
 echo ""
 echo "=== Consolidating outputs into rast.tsv ==="
-python3 "$SCRIPT_DIR/generate_rast_tsv.py" "$OUTPUT_DIR" "$SCIENTIFIC_NAME"
+if [ "$RUN_MODE" = "no-seed" ]; then
+    python3 "$SCRIPT_DIR/generate_rast_tsv.py" "$OUTPUT_DIR" "$SCIENTIFIC_NAME" --no-seed
+else
+    python3 "$SCRIPT_DIR/generate_rast_tsv.py" "$OUTPUT_DIR" "$SCIENTIFIC_NAME"
+fi
 
 # rast.tsv is written directly into the main output directory by generate_rast_tsv.py
 if [ -f "$OUTPUT_DIR/rast.tsv" ]; then

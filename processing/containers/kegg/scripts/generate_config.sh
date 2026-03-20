@@ -53,16 +53,26 @@ EOF
 fi
 
 # Replace keys while preserving official template structure where possible.
-sed -i.bak -E "s|^profile:.*$|profile: ${DB_DIR_RESOLVED}/profiles|" "$OUTPUT_FILE" || true
-sed -i.bak -E "s|^ko_list:.*$|ko_list: ${DB_DIR_RESOLVED}/ko_list|" "$OUTPUT_FILE" || true
-sed -i.bak -E "s|^hmmsearch:.*$|hmmsearch: /usr/local/bin/hmmsearch|" "$OUTPUT_FILE" || true
-sed -i.bak -E "s|^parallel:.*$|parallel: /usr/bin/parallel|" "$OUTPUT_FILE" || true
-if grep -q '^cpu:' "$OUTPUT_FILE"; then
-    sed -i.bak -E "s|^cpu:.*$|cpu: ${CPU}|" "$OUTPUT_FILE" || true
+# The official kofamscan config-template.yml ships with all entries commented out
+# (e.g. "# ko_list: /path/to/ko_list"), so we must match both commented and
+# uncommented forms.  Use [# ]* to cover both cases.
+sed -i.bak -E "s|^[# ]*profile:.*$|profile: ${DB_DIR_RESOLVED}/profiles|" "$OUTPUT_FILE" || true
+sed -i.bak -E "s|^[# ]*ko_list:.*$|ko_list: ${DB_DIR_RESOLVED}/ko_list|" "$OUTPUT_FILE" || true
+sed -i.bak -E "s|^[# ]*hmmsearch:.*$|hmmsearch: /usr/local/bin/hmmsearch|" "$OUTPUT_FILE" || true
+sed -i.bak -E "s|^[# ]*parallel:.*$|parallel: /usr/bin/parallel|" "$OUTPUT_FILE" || true
+if grep -qE '^[# ]*cpu:' "$OUTPUT_FILE"; then
+    sed -i.bak -E "s|^[# ]*cpu:.*$|cpu: ${CPU}|" "$OUTPUT_FILE" || true
 else
     printf '\ncpu: %s\n' "$CPU" >> "$OUTPUT_FILE"
 fi
 rm -f "$OUTPUT_FILE.bak"
+# Safety check: ensure required keys are actually present (un-commented)
+if ! grep -qE '^ko_list:' "$OUTPUT_FILE"; then
+    printf '\nko_list: %s/ko_list\n' "${DB_DIR_RESOLVED}" >> "$OUTPUT_FILE"
+fi
+if ! grep -qE '^profile:' "$OUTPUT_FILE"; then
+    printf '\nprofile: %s/profiles\n' "${DB_DIR_RESOLVED}" >> "$OUTPUT_FILE"
+fi
 
 echo "Generated KofamScan config at ${OUTPUT_FILE}"
 echo "Resolved KOfam DB directory: ${DB_DIR_RESOLVED}"
