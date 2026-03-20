@@ -103,8 +103,8 @@ hmmscan \
     --cpu "$THREADS" \
     -E "$EVALUE_CUTOFF" \
     --domE "$EVALUE_CUTOFF" \
-    --domtblout "$OUTPUT_DIR/dbcan_domains.tsv" \
-    --tblout "$OUTPUT_DIR/dbcan_hits.tsv" \
+    --domtblout "$OUTPUT_DIR/dbcan_domains.txt" \
+    --tblout "$OUTPUT_DIR/dbcan_hits.txt" \
     --notextw \
     -o "$OUTPUT_DIR/hmmscan_output.txt" \
     "$DATABASE" \
@@ -115,14 +115,14 @@ echo "End time: $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
 # Check output
-if [[ ! -f "$OUTPUT_DIR/dbcan_domains.tsv" ]]; then
+if [[ ! -f "$OUTPUT_DIR/dbcan_domains.txt" ]]; then
     echo "ERROR: HMMER output not created"
     exit 1
 fi
 
 # Count domain hits
-DOMAIN_COUNT=$(grep -v '^#' "$OUTPUT_DIR/dbcan_domains.tsv" | wc -l | tr -d ' ')
-UNIQUE_PROTEINS=$(grep -v '^#' "$OUTPUT_DIR/dbcan_domains.tsv" | cut -f1 | sort -u | wc -l | tr -d ' ')
+DOMAIN_COUNT=$(grep -v '^#' "$OUTPUT_DIR/dbcan_domains.txt" | wc -l | tr -d ' ')
+UNIQUE_PROTEINS=$(grep -v '^#' "$OUTPUT_DIR/dbcan_domains.txt" | awk '{print $4}' | sort -u | wc -l | tr -d ' ')
 
 echo "========================================"
 echo "HMMER Scan Complete"
@@ -130,6 +130,13 @@ echo "========================================"
 echo "Domain hits: $DOMAIN_COUNT"
 echo "Proteins with domains: $UNIQUE_PROTEINS / $PROTEIN_COUNT"
 echo "Output files:"
-echo "  - Domain table: $OUTPUT_DIR/dbcan_domains.tsv"
+echo "  - Domain table: $OUTPUT_DIR/dbcan_domains.txt"
 echo "  - Full output: $OUTPUT_DIR/hmmscan_output.txt"
 echo "========================================"
+
+# Generate structured TSV for downstream consolidation
+awk -v OFS='\t' '
+  BEGIN { print "feature_id", "DBCAN_family", "DBCAN_full_evalue", "DBCAN_domain_evalue" }
+  !/^#/ { gsub(/\.hmm$/, "", $1); print $4, $1, $7, $13 }
+' "$OUTPUT_DIR/dbcan_domains.txt" > "$OUTPUT_DIR/dbcan.tsv" || true
+echo "Created dbcan.tsv: $(tail -n +2 "$OUTPUT_DIR/dbcan.tsv" 2>/dev/null | wc -l | tr -d ' ') entries"

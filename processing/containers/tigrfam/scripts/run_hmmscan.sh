@@ -174,4 +174,12 @@ log "  - Best-hit domains:        $OUTPUT_DIR/tigrfam.best1.domains"
 log "  - Non-overlapping:         $OUTPUT_DIR/tigrfam.nonoverlap.domains"
 log "  - Log file:                $LOG_FILE"
 log "========================================="
+
+# Generate structured TSV for downstream consolidation and interpro mapping
+awk -v OFS='\t' '
+  BEGIN { print "feature_id", "TIGRFAM_id", "TIGRFAM_description" }
+  !/^#/ { print $4, $1, $1 }
+' "$OUTPUT_DIR/tigrfam.nonoverlap.domains" > "$OUTPUT_DIR/tigrfam.tsv" || true
+log "Created tigrfam.tsv: $(tail -n +2 "$OUTPUT_DIR/tigrfam.tsv" 2>/dev/null | wc -l | tr -d ' ') entries"
+
 exit 0

@@ -985,8 +985,8 @@ run_annotation_tool_direct() {
         interpro)
             python3 "$CONTAINERS_DIR/interpro/scripts/run_interpro_mapping.py" \
                 --organism "$genome_name" \
-                --pfam "$OUTPUT_DIR/pfam/$genome_name/pfam.nonoverlap.domains" \
-                --tigrfam "$OUTPUT_DIR/tigrfam/$genome_name/tigrfam.domtblout" \
+                --pfam "$OUTPUT_DIR/pfam/$genome_name/pfam.tsv" \
+                --tigrfam "$OUTPUT_DIR/tigrfam/$genome_name/tigrfam.tsv" \
                 --mapping "$(resolve_db_dir interpro)/signature_to_ipr.tsv" \
                 --output "$tool_out/interpro.tsv" ;;
         operon)

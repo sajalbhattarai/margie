@@ -170,3 +170,14 @@ else
     log "ERROR: Output file was not created!"
     exit 1
 fi
+
+# Generate structured TSV for downstream consolidation
+# kofamscan detail format: '*'/space, gene_id, KO, threshold, score, evalue, [definition]
+# Lines starting with '*' are above threshold; others are below
+awk -v OFS='\t' '
+  BEGIN { print "feature_id", "KEGG_KO", "KEGG_score", "KEGG_evalue", "KEGG_above_threshold" }
+  /^#/ || /^[[:space:]]*$/ { next }
+  $1 == "*" && $3 ~ /^K[0-9]/ { print $2, $3, $5, $6, "yes" }
+  $1 != "*" && $2 ~ /^K[0-9]/  { print $1, $2, $4, $5, "no"  }
+' "$OUTPUT_FILE" > "$OUTPUT_BASE_DIR/kegg.tsv" || true
+log "Created kegg.tsv: $(tail -n +2 "$OUTPUT_BASE_DIR/kegg.tsv" 2>/dev/null | wc -l | tr -d ' ') entries"

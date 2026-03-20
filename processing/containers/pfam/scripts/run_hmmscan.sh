@@ -192,4 +192,12 @@ log "  - Best-hit domains:     $OUTPUT_DIR/pfam.best1.domains"
 log "  - Non-overlapping:      $OUTPUT_DIR/pfam.nonoverlap.domains"
 log "  - Log file:             $LOG_FILE"
 log "========================================="
+
+# Generate structured TSV for downstream consolidation and interpro mapping
+awk -v OFS='\t' '
+  BEGIN { print "feature_id", "PFAM_accession", "PFAM_description" }
+  !/^#/ { split($2, a, "."); print $4, a[1], $1 }
+' "$OUTPUT_DIR/pfam.nonoverlap.domains" > "$OUTPUT_DIR/pfam.tsv" || true
+log "Created pfam.tsv: $(tail -n +2 "$OUTPUT_DIR/pfam.tsv" 2>/dev/null | wc -l | tr -d ' ') entries"
+
 exit 0

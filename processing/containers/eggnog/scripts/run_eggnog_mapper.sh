@@ -128,9 +128,18 @@ else
 fi
 
 log ""
-log "========================================" 
+log "========================================"
 log "EggNOG Mapper Complete"
-log "========================================" 
+log "========================================"
 log "Output directory: $NATIVE_DIR"
 log "Log file: $LOG_FILE"
 log ""
+
+# Generate consolidated eggnog.tsv for downstream aggregation
+if python3 /container/scripts/consolidate_eggnog.py \
+        "$ANNOTATIONS_FILE" "$INPUT_FAA" "$ORGANISM_NAME" "$OUTPUT_DIR/eggnog.tsv" \
+        >> "$LOG_FILE" 2>&1; then
+    log "Created eggnog.tsv: $(tail -n +2 "$OUTPUT_DIR/eggnog.tsv" 2>/dev/null | wc -l | tr -d ' ') entries"
+else
+    log "Warning: eggnog TSV consolidation failed; raw annotations still available at $ANNOTATIONS_FILE"
+fi
