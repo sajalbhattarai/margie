@@ -407,6 +407,10 @@ run_indexer() {
     if [[ "$RUNTIME" == "docker" ]]; then
         if [[ -n "$image" ]] && docker image inspect "$image" >/dev/null 2>&1; then
             echo -e "${YELLOW}  ! Host $1 missing, using Docker image ${image} for indexing.${NC}"
+            if ! docker run --rm --platform "$docker_platform" "$image" /bin/sh -lc "command -v '$1' >/dev/null 2>&1"; then
+                warn_missing_indexer "$1" "$db_name"
+                return 0
+            fi
             if docker run --rm --platform "$docker_platform" -v "$DB_DIR:/db" -w "/db/${db_name}" "$image" "$@"; then
                 return 0
             fi
@@ -415,6 +419,10 @@ run_indexer() {
     elif [[ "$RUNTIME" == "apptainer" || "$RUNTIME" == "singularity" ]]; then
         if [[ -f "$sif" ]]; then
             echo -e "${YELLOW}  ! Host $1 missing, using ${RUNTIME} image ${sif} for indexing.${NC}"
+            if ! "$RUNTIME" exec --bind "$DB_DIR:/db" --pwd "/db/${db_name}" "$sif" /bin/sh -lc "command -v '$1' >/dev/null 2>&1"; then
+                warn_missing_indexer "$1" "$db_name"
+                return 0
+            fi
             if "$RUNTIME" exec --bind "$DB_DIR:/db" --pwd "/db/${db_name}" "$sif" "$@"; then
                 return 0
             fi

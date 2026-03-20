@@ -17,7 +17,7 @@ From: continuumio/miniconda3:latest
         coreutils \
         procps \
         && rm -rf /var/lib/apt/lists/*
-    conda install -y -c conda-forge -c bioconda cogclassifier blast
+    conda install -y -c conda-forge -c bioconda cogclassifier blast diamond
     conda clean -afy
     mkdir -p /container/input /container/output /container/db /container/scripts
 

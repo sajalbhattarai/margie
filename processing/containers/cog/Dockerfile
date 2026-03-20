@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-RUN conda install -y -c conda-forge -c bioconda cogclassifier blast && \
+RUN conda install -y -c conda-forge -c bioconda cogclassifier blast diamond && \
     conda clean -afy
 
 # Create working directories
