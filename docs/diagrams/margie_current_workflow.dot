@@ -1,0 +1,99 @@
+digraph MargieWorkflow {
+  graph [
+    rankdir=TB,
+    splines=polyline,
+    pad=0.3,
+    nodesep=0.45,
+    ranksep=0.7,
+    bgcolor="white",
+    fontname="Helvetica"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    color="#334155",
+    penwidth=1.3,
+    fillcolor="#f8fafc",
+    fontname="Helvetica",
+    fontsize=14,
+    margin="0.18,0.12"
+  ];
+
+  edge [
+    color="#475569",
+    penwidth=1.4,
+    arrowsize=0.9,
+    fontname="Helvetica",
+    fontsize=11
+  ];
+
+  subgraph cluster_access {
+    label="How We Start";
+    color="#cbd5e1";
+    style="rounded";
+
+    cli [label="CLI\nannotate-genome", fillcolor="#dcfce7"];
+    wizard [label="Interactive wizard\n--interactive", fillcolor="#dcfce7"];
+    gui [label="Streamlit GUI\nrun_gui.sh", fillcolor="#dcfce7"];
+  }
+
+  setup [label="Setup + readiness\npreflight, build/pull containers,\ndownload/index databases", fillcolor="#fef3c7"];
+  db_policy [label="Runtime DB policy\nprefer shared DB root if populated,\notherwise use repo db/", fillcolor="#fef3c7"];
+  input [label="Input genomes\nsingle file or batch under input/", fillcolor="#dbeafe"];
+  input_type [label="Input type?", shape=diamond, style="filled", fillcolor="#e0e7ff"];
+
+  prodigal [label="Genome FASTA path\nProdigal gene calling\ncreates FAA + GFF", fillcolor="#bae6fd"];
+  protein_ready [label="Protein FAA ready\nfrom input FAA or Prodigal output", fillcolor="#bae6fd"];
+  rasttk [label="Optional RASTtk path\nadditional gene calling + annotation\ncreates FAA, GFF, RAST outputs", fillcolor="#bbf7d0"];
+
+  tool_suite [label="Protein annotation suite\nCOG, Pfam, TIGRfam, dbCAN, KEGG,\neggNOG, MEROPS, TCDB, UniProt,\nInterPro mapping, Operon from GFF", fillcolor="#ccfbf1"];
+  per_tool [label="Per-tool outputs\noutput/<tool>/<genome>/", fillcolor="#e2e8f0"];
+
+  consolidation [label="Consolidation\nmerge per-tool TSV files into one\ngene-centric table per genome", fillcolor="#fecaca"];
+  consolidated [label="Consolidated table\noutput/consolidation/<genome>/\nconsolidated_<genome>.tsv", fillcolor="#fecaca"];
+
+  scoring [label="Optional concordance scoring\noutput/scoring/<genome>/scoring.tsv", fillcolor="#fde68a"];
+  puls [label="Optional PUL detection\nTSV + HTML report", fillcolor="#fde68a"];
+
+  synteny_gate [label="Optional cross-genome synteny\nrun after batch completion\nrequires >=2 RASTtk genomes", fillcolor="#fed7aa"];
+  synteny_core [label="DIAMOND all-vs-all\n-> MCScanX collinearity\n-> syntenic gene pairs", fillcolor="#fed7aa"];
+  synteny_join [label="Join synteny pairs with\nconsolidated annotations", fillcolor="#fed7aa"];
+  synteny_out [label="Synteny outputs\noutput/synteny/\nblast, collinearity, comparison tables", fillcolor="#fed7aa"];
+
+  final_out [label="Current overall deliverables\nper-tool results, consolidated tables,\nscoring, PUL reports, synteny outputs", fillcolor="#e2e8f0"];
+
+  cli -> setup;
+  wizard -> setup;
+  gui -> setup;
+  setup -> db_policy;
+  db_policy -> input;
+  input -> input_type;
+
+  input_type -> prodigal [label="genome FASTA"];
+  input_type -> protein_ready [label="protein FAA"];
+  input -> rasttk [label="optional genome annotation path"];
+
+  prodigal -> protein_ready;
+  prodigal -> tool_suite [label="GFF supports operon"];
+  protein_ready -> tool_suite;
+  rasttk -> consolidation;
+  rasttk -> synteny_gate;
+
+  tool_suite -> per_tool;
+  tool_suite -> consolidation;
+  consolidation -> consolidated;
+  consolidated -> scoring;
+  consolidated -> puls;
+  consolidated -> synteny_gate;
+
+  synteny_gate -> synteny_core;
+  synteny_core -> synteny_join;
+  synteny_join -> synteny_out;
+
+  per_tool -> final_out;
+  consolidated -> final_out;
+  scoring -> final_out;
+  puls -> final_out;
+  synteny_out -> final_out;
+}

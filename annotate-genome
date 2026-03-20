@@ -50,7 +50,7 @@ RASTTK_RUN_MODE="full"
 
 # ── Tool catalogue ─────────────────────────────────────────────────────────────
 ALL_DB_TOOLS=(cog pfam tigrfam kegg dbcan eggnog merops tcdb uniprot interpro rasttk operon)
-ALL_PIPELINE_STEPS=(prodigal cog pfam tigrfam kegg dbcan eggnog merops tcdb uniprot interpro rasttk operon consolidation)
+ALL_PIPELINE_STEPS=(prodigal cog pfam tigrfam kegg dbcan eggnog merops tcdb uniprot interpro rasttk operon consolidation synteny)
 GENE_CALLER_TOOLS=(prodigal rasttk)
 RUN_SELECTED_TOOLS=()
 
@@ -153,7 +153,7 @@ ${BOLD}SETUP FLAGS${NC}
                       Build containers and download databases
   --gui               Build the Margie GUI container (optional)
   --cog --pfam --tigrfam --kegg --dbcan --eggnog --merops --tcdb
-  --uniprot --interpro --rasttk --operon --prodigal --consolidation
+  --uniprot --interpro --rasttk --operon --prodigal --consolidation --synteny
                                             With --setup: build only the named tool container(s)
                                             Without --setup: run the named tool(s) directly
   --dry-run           Preview setup commands without executing
@@ -312,28 +312,19 @@ check_postprocessing_readiness() {
         echo -e "${YELLOW}[warn] PUL wrapper missing: $SCRIPT_DIR/processing/scripts/puls/run_pul_detection.sh${NC}"
         ok=0
     fi
-    if [[ ! -x "$SCRIPT_DIR/processing/scripts/synteny/run_mcscanx_workflow.sh" ]]; then
-        echo -e "${YELLOW}[warn] Synteny wrapper missing: $SCRIPT_DIR/processing/scripts/synteny/run_mcscanx_workflow.sh${NC}"
+    if ! check_container_ready synteny; then
+        echo -e "${YELLOW}[warn] Synteny container is not ready. Build it with: ./annotate-genome --setup --synteny${NC}"
         ok=0
     fi
 
     if ! command -v python3 >/dev/null 2>&1; then
-        echo -e "${YELLOW}[warn] python3 not found; scoring/PUL/synteny stages require Python.${NC}"
+        echo -e "${YELLOW}[warn] python3 not found; scoring/PUL stages require Python.${NC}"
         ok=0
     elif ! python3 - <<'PY' >/dev/null 2>&1
 import pandas
 PY
     then
-        echo -e "${YELLOW}[warn] pandas is not available in current python3 environment; scoring/PUL/synteny join may fail.${NC}"
-        ok=0
-    fi
-
-    if ! command -v diamond >/dev/null 2>&1; then
-        echo -e "${YELLOW}[warn] diamond not found; synteny workflow requires DIAMOND on PATH.${NC}"
-        ok=0
-    fi
-    if ! command -v MCScanX >/dev/null 2>&1; then
-        echo -e "${YELLOW}[warn] MCScanX not found; synteny workflow requires MCScanX on PATH.${NC}"
+        echo -e "${YELLOW}[warn] pandas is not available in current python3 environment; scoring/PUL may fail.${NC}"
         ok=0
     fi
 
@@ -342,7 +333,7 @@ PY
         return 0
     fi
 
-    echo -e "${YELLOW}Tip: scoring/PUL need python3+pandas; synteny also needs diamond+MCScanX in PATH.${NC}"
+    echo -e "${YELLOW}Tip: build synteny container with ./annotate-genome --setup --synteny for fully containerized execution.${NC}"
     return 1
 }
 
@@ -421,17 +412,13 @@ run_puls_for_existing_consolidated() {
 run_synteny_for_existing_consolidated() {
     local genomes_csv="${1:-}"
     local synteny_root="$OUTPUT_DIR/synteny"
-    local synteny_script="$SCRIPT_DIR/processing/scripts/synteny/run_mcscanx_workflow.sh"
 
-    if [[ ! -x "$synteny_script" ]]; then
-        echo -e "${RED}Missing synteny workflow script: $synteny_script${NC}"
-        return 1
-    fi
+    mkdir -p "$synteny_root"
 
     local args=(
-        --rasttk-dir "$OUTPUT_DIR/rasttk"
-        --consolidated-dir "$OUTPUT_DIR/consolidation"
-        --outdir "$synteny_root"
+        --rasttk-dir /container/output/rasttk
+        --consolidated-dir /container/output/consolidation
+        --outdir /container/output/synteny
         --threads "$(effective_threads)"
     )
 
@@ -439,7 +426,11 @@ run_synteny_for_existing_consolidated() {
         args+=(--genomes "$genomes_csv")
     fi
 
-    bash "$synteny_script" "${args[@]}"
+    run_tool_container synteny \
+        "$SCRIPT_DIR:/container/work:ro" \
+        "$OUTPUT_DIR:/container/output:rw" \
+        "" \
+        bash /container/work/processing/containers/synteny/scripts/run_mcscanx_workflow.sh "${args[@]}"
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -888,7 +879,10 @@ discover_gene_call_candidates() {
 
 prompt_select_gene_calls() {
     local -a records=()
-    mapfile -t records < <(discover_gene_call_candidates)
+    local records=()
+    while IFS= read -r -d '' file; do
+        records+=("$file")
+    done < <(discover_gene_call_candidates | tr '\n' '\0')
     [[ "${#records[@]}" -eq 0 ]] && return 1
 
     local idx=1 selection nums n caller genome faa gff
@@ -1008,15 +1002,22 @@ run_annotation_tool_direct() {
 }
 
 run_selected_tools_mode() {
-    local -a gene_tools=() annotation_tools=()
+    local -a gene_tools=() annotation_tools=() post_tools=()
     local tool
     for tool in "${RUN_SELECTED_TOOLS[@]}"; do
-        if is_gene_caller_tool "$tool"; then
+        if [[ "$tool" == "synteny" ]]; then
+            post_tools+=("$tool")
+        elif is_gene_caller_tool "$tool"; then
             gene_tools+=("$tool")
         else
             annotation_tools+=("$tool")
         fi
     done
+
+    if [[ "${#gene_tools[@]}" -eq 0 && "${#annotation_tools[@]}" -eq 0 && "${#post_tools[@]}" -gt 0 ]]; then
+        run_synteny_for_existing_consolidated
+        return $?
+    fi
 
     if [[ "${#gene_tools[@]}" -gt 1 && "${#annotation_tools[@]}" -gt 0 ]]; then
         echo -e "${RED}Select at most one gene caller when combining with annotation tools.${NC}"
@@ -1028,7 +1029,10 @@ run_selected_tools_mode() {
         if [[ -n "$INPUT_FASTA" ]]; then
             genome_files=("$INPUT_FASTA")
         else
-            mapfile -t genome_files < <(prompt_select_input_genomes "$INPUT_DIR")
+            local genome_files=()
+            while IFS= read -r -d '' file; do
+                genome_files+=("$file")
+            done < <(prompt_select_input_genomes "$INPUT_DIR" | tr '\n' '\0')
         fi
         [[ "${#genome_files[@]}" -eq 0 ]] && { echo -e "${YELLOW}No input genomes selected.${NC}"; return 1; }
 
@@ -1045,6 +1049,9 @@ run_selected_tools_mode() {
                 done
             done
         done
+        if [[ "${#post_tools[@]}" -gt 0 ]]; then
+            run_synteny_for_existing_consolidated
+        fi
         return 0
     fi
 
@@ -1052,7 +1059,10 @@ run_selected_tools_mode() {
     if [[ -n "$INPUT_FASTA" ]]; then
         if [[ "$INPUT_FASTA" != *.faa ]]; then
             echo -e "${YELLOW}Direct annotation tools expect protein FASTA input or an existing gene-call selection.${NC}"
-            mapfile -t selected_records < <(prompt_select_gene_calls)
+            local selected_records=()
+            while IFS= read -r -d '' rec; do
+                selected_records+=("$rec")
+            done < <(prompt_select_gene_calls | tr '\n' '\0')
         else
             local genome_name
             genome_name="$(normalize_genome_name "$INPUT_FASTA")"
@@ -1073,6 +1083,10 @@ run_selected_tools_mode() {
             run_annotation_tool_direct "$tool" "$genome_name" "$protein_faa" "$gff_file"
         done
     done
+
+    if [[ "${#post_tools[@]}" -gt 0 ]]; then
+        run_synteny_for_existing_consolidated
+    fi
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1449,7 +1463,10 @@ run_auto() {
     echo "  Input dir : $INPUT_DIR"
     echo "  Output dir: $OUTPUT_DIR"
 
-    mapfile -t genome_files < <(list_input_genomes)
+    local genome_files=()
+    while IFS= read -r -d '' file; do
+        genome_files+=("$file")
+    done < <(list_input_genomes | tr '\n' '\0')
 
     if [[ "${#genome_files[@]}" -eq 0 ]]; then
         echo ""
@@ -2019,7 +2036,11 @@ while [[ $# -gt 0 ]]; do
         --redo)            PIPELINE_REDO=1;      shift ;;
         --scoring)         RUN_SCORING=1;        shift ;;
         --puls)            RUN_PULS=1;           shift ;;
-        --synteny)         RUN_SYNTENY=1;        shift ;;
+        --synteny)
+            RUN_SYNTENY=1
+            append_selected_run_tool "synteny"
+            shift
+            ;;
         --only-prodigal)   RASTTK_RUN_MODE="only-prodigal"; shift ;;
         --only-prodigal-and-glimmer)
                    RASTTK_RUN_MODE="only-prodigal-and-glimmer"; shift ;;

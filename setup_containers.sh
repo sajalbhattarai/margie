@@ -7,7 +7,7 @@
 #   ./setup_containers.sh --apptainer  # force Apptainer
 #   ./setup_containers.sh --skip-db     # build containers only
 #   ./setup_containers.sh --operon      # build only the operon container path
-#   ./setup_containers.sh --prodigal --rasttk   # build only selected tool containers
+#   ./setup_containers.sh --prodigal --rasttk --synteny  # build only selected tool containers
 #   ./setup_containers.sh --db cog,pfam # build containers + selected databases
 #   ./setup_containers.sh --cog --pfam   # build only COG/Pfam container paths and set up those DBs
 #   ./setup_containers.sh --all | -all   # all supported databases
@@ -37,6 +37,7 @@ CONTAINERS=(
     "interpro:interpro-annotation:1.0"
     "pfam:pfam-annotation:1.0"
     "tcdb:tcdb-annotation:1.0"
+    "synteny:synteny-annotation:1.0"
 )
 
 OFFICIAL_DBCAN_IMAGE="haidyi/run_dbcan:latest"
@@ -199,6 +200,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --consolidation)
             append_requested_tool "consolidation"
+            shift
+            ;;
+        --synteny)
+            append_requested_tool "synteny"
             shift
             ;;
         --gui)

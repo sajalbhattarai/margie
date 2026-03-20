@@ -173,7 +173,7 @@ log "✓ Format conversion complete"
 
 # Step 2: Run UniOP (containerized)
 log ""
-log "[Step 2/4] Running UniOP operon prediction..."
+log "[Step 2/4] Running operon prediction..."
 log ""
 
 if [ "$CONTAINER_RUNTIME" = "docker" ]; then
@@ -181,14 +181,14 @@ if [ "$CONTAINER_RUNTIME" = "docker" ]; then
         -v "$PRODIGAL_FAA:/input/proteins.faa:ro" \
         -v "$OUTPUT_DIR_ABS/native:/output" \
         "$CONTAINER_NAME" \
-        UniOP -a /input/proteins.faa -t /output \
+        -i /input/proteins.faa -o /output --genome "$GENOME_NAME" \
         2>&1 | tee -a "$LOG_FILE"
 else
     "$RUNTIME_BIN" exec \
         --bind "$PRODIGAL_FAA:/input/proteins.faa" \
         --bind "$OUTPUT_DIR_ABS/native:/output" \
         "$CONTAINER_NAME" \
-        UniOP -a /input/proteins.faa -t /output \
+        operon_exec -i /input/proteins.faa -o /output --genome "$GENOME_NAME" \
         2>&1 | tee -a "$LOG_FILE"
 fi
 
@@ -198,14 +198,50 @@ if [ ${PIPESTATUS[0]} -ne 0 ]; then
 fi
 
 log ""
-log "✓ UniOP prediction complete"
+log "✓ Operon prediction complete"
 
-# Verify UniOP output files exist
+FINAL_TSV="$OUTPUT_DIR_ABS/operons.tsv"
+if [ -f "$OUTPUT_DIR_ABS/native/$GENOME_NAME/operons.tsv" ] && [ ! -f "$FINAL_TSV" ]; then
+    cp "$OUTPUT_DIR_ABS/native/$GENOME_NAME/operons.tsv" "$FINAL_TSV"
+fi
+
+if [ -f "$FINAL_TSV" ]; then
+    log ""
+    log "Detected modern operon_exec output: $FINAL_TSV"
+    LINE_COUNT=$(wc -l < "$FINAL_TSV" | tr -d ' ')
+    GENE_COUNT=$((LINE_COUNT - 1))
+    OPERON_COUNT=$(tail -n +2 "$FINAL_TSV" | awk -F'\t' '$2 != "NA" {print $2}' | sort -u | wc -l | tr -d ' ')
+    GENES_IN_OPS=$(tail -n +2 "$FINAL_TSV" | awk -F'\t' '$2 != "NA"' | wc -l | tr -d ' ')
+    if [ $TOTAL_PROTEINS -gt 0 ]; then
+        COVERAGE=$(awk "BEGIN {printf \"%.1f\", 100.0 * $GENES_IN_OPS / $TOTAL_PROTEINS}")
+    else
+        COVERAGE="0.0"
+    fi
+
+    log ""
+    log "=========================================================================="
+    log "                   Operon Prediction Complete!                      "
+    log "=========================================================================="
+    log ""
+    log "Summary:"
+    log "  • Total genes analyzed: $TOTAL_PROTEINS"
+    log "  • Genes in operons: $GENES_IN_OPS ($COVERAGE%)"
+    log "  • Total operons: $OPERON_COUNT"
+    log ""
+    log "Main output file:"
+    log "  • $FINAL_TSV"
+    log ""
+    log "Columns: feature_id, operon_id, operon_size, operon_position, member_genes, ..."
+    log ""
+    exit 0
+fi
+
+# Legacy UniOP path (older images)
 UNIOP_PRED="$OUTPUT_DIR_ABS/native/uniop.pred"
 UNIOP_OPERON="$OUTPUT_DIR_ABS/native/uniop.operon"
 
 if [ ! -f "$UNIOP_PRED" ] || [ ! -f "$UNIOP_OPERON" ]; then
-    log "ERROR: UniOP output files not found"
+    log "ERROR: Operon output files not found (neither modern operons.tsv nor legacy uniop.* files)"
     exit 1
 fi
 
@@ -227,7 +263,7 @@ if [ ${PIPESTATUS[0]} -ne 0 ]; then
     exit 1
 fi
 
-# Step 4: Create comprehensive operon annotation table
+# Step 4: Create comprehensive operon annotation table (legacy UniOP mode)
 log ""
 log "[Step 4/4] Creating comprehensive operon annotation table..."
 log ""
