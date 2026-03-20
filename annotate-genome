@@ -634,6 +634,9 @@ db_dir_is_usable() {
         uniprot)
             [[ -f "$db_dir/uniprot_sprot.fasta" || -f "$db_dir/uniprot_sprot.fasta.gz" ]]
             ;;
+        interpro)
+            compgen -G "$db_dir/interproscan-*/interproscan.sh" >/dev/null
+            ;;
         *)
             find "$db_dir" -mindepth 1 -maxdepth 2 -type f 2>/dev/null | head -1 | grep -q .
             ;;
@@ -983,12 +986,26 @@ run_annotation_tool_direct() {
             run_tool_container uniprot "$input_dir:/container/input:ro" "$tool_out:/container/output:rw" "$db_dir:/container/db:ro" \
                 bash /container/scripts/run_upimapi.sh "/container/input/$(basename "$protein_faa")" "/container/output/uniprot_hits.tsv" "/container/db/uniprot_sprot.fasta" "$(effective_threads)" ;;
         interpro)
-            python3 "$CONTAINERS_DIR/interpro/scripts/run_interpro_mapping.py" \
-                --organism "$genome_name" \
-                --pfam "$OUTPUT_DIR/pfam/$genome_name/pfam.tsv" \
-                --tigrfam "$OUTPUT_DIR/tigrfam/$genome_name/tigrfam.tsv" \
-                --mapping "$(resolve_db_dir interpro)/signature_to_ipr.tsv" \
-                --output "$tool_out/interpro.tsv" ;;
+            bash "$CONTAINERS_DIR/interpro/scripts/run_interproscan.sh" \
+                --input "$protein_faa" \
+                --output "$tool_out" \
+                --db "$db_dir" \
+                --threads "$(effective_threads)"
+
+            if [[ -f "$OUTPUT_DIR/pfam/$genome_name/pfam.tsv" && -f "$OUTPUT_DIR/tigrfam/$genome_name/tigrfam.tsv" && -f "$db_dir/signature_to_ipr.tsv" ]]; then
+                python3 "$CONTAINERS_DIR/interpro/scripts/run_interpro_mapping.py" \
+                    --organism "$genome_name" \
+                    --pfam "$OUTPUT_DIR/pfam/$genome_name/pfam.tsv" \
+                    --tigrfam "$OUTPUT_DIR/tigrfam/$genome_name/tigrfam.tsv" \
+                    --mapping "$db_dir/signature_to_ipr.tsv" \
+                    --output "$tool_out/interpro.tsv"
+            else
+                python3 "$CONTAINERS_DIR/interpro/scripts/aggregate_interproscan.py" \
+                    --organism "$genome_name" \
+                    --interproscan "$tool_out/interproscan.tsv" \
+                    --output "$tool_out/interpro.tsv"
+            fi
+            ;;
         operon)
             if [[ -z "$gff_file" || ! -f "$gff_file" ]]; then
                 echo -e "  ${YELLOW}[skip] operon requires a gene-caller GFF; none was selected for $genome_name${NC}"

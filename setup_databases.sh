@@ -151,6 +151,10 @@ TIGRFAM_BASE="https://ftp.ncbi.nlm.nih.gov/hmm/TIGRFAMs/release_15.0"
 PGAP_BASE="https://ftp.ncbi.nlm.nih.gov/hmm/current"
 UNIPROT_SPROT_URL="https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz"
 INTERPRO_BASE="https://ftp.ebi.ac.uk/pub/databases/interpro"
+INTERPROSCAN_VERSION="5.77-108.0"
+INTERPROSCAN_ARCHIVE="interproscan-${INTERPROSCAN_VERSION}-64-bit.tar.gz"
+INTERPROSCAN_MD5_FILE="${INTERPROSCAN_ARCHIVE}.md5"
+INTERPROSCAN_SOFTWARE_BASE="https://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/${INTERPROSCAN_VERSION}"
 OFFICIAL_DBCAN_IMAGE="haidyi/run_dbcan:latest"
 OFFICIAL_EGGNOG_IMAGE="quay.io/biocontainers/eggnog-mapper:2.1.12--pyhdfd78af_0"
 
@@ -852,6 +856,48 @@ validate_gzip_file() {
     return 0
 }
 
+verify_md5_checksum_file() {
+    local archive_file="$1"
+    local md5_file="$2"
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        if have_cmd md5sum; then
+            cmd md5sum -c "$md5_file"
+        else
+            cmd sh -c "md5 -q '$archive_file'"
+        fi
+        return 0
+    fi
+
+    require_nonempty_file "$archive_file" "$archive_file" || return 1
+    require_nonempty_file "$md5_file" "$md5_file" || return 1
+
+    if have_cmd md5sum; then
+        if md5sum -c "$md5_file"; then
+            return 0
+        fi
+        echo -e "${RED}  ✗ Checksum verification failed for $archive_file using md5sum.${NC}"
+        return 1
+    fi
+
+    if have_cmd md5; then
+        local expected actual
+        expected="$(awk '{print $1}' "$md5_file" | head -n1)"
+        actual="$(md5 -q "$archive_file")"
+        if [[ -n "$expected" && "$expected" == "$actual" ]]; then
+            echo "${archive_file}: OK"
+            return 0
+        fi
+        echo -e "${RED}  ✗ Checksum verification failed for $archive_file using md5.${NC}"
+        echo "    expected: $expected"
+        echo "    actual:   $actual"
+        return 1
+    fi
+
+    echo -e "${RED}  ✗ Neither md5sum nor md5 is available; cannot validate $archive_file.${NC}"
+    return 1
+}
+
 file_nonempty() {
     local file="$1"
     [[ -f "$file" && -s "$file" ]]
@@ -1321,11 +1367,11 @@ setup_uniprot() {
 
 # ── InterPro ────────────────────────────────────────────────────────────────────
 setup_interpro() {
-    echo -e "${YELLOW}Setting up InterPro database files...${NC}"
+    echo -e "${YELLOW}Setting up InterPro resources (InterProScan + mapping files)...${NC}"
     cmd mkdir -p "$DB_DIR/interpro"
     [[ "$DRY_RUN" -eq 0 ]] && cd "$DB_DIR/interpro"
 
-    # Signature mapping used by existing workflows
+    # Signature mapping used by existing workflow outputs
     if [[ "$DRY_RUN" -eq 0 ]] && { file_nonempty signature_to_ipr.tsv || file_nonempty signature_to_ipr.dat; }; then
         echo -e "${GREEN}  ✓ Reusing existing InterPro signature mappings (download skipped)${NC}"
     else
@@ -1341,12 +1387,29 @@ setup_interpro() {
         fi
     fi
 
-    # InterProScan data bundle (large; optional because users may run Nextflow install)
-    if [[ "$DRY_RUN" -eq 1 || ! -f interproscan-data-5.77-108.0.tar.gz ]]; then
-        download_optional "$INTERPRO_BASE/interproscan/5/interproscan-data-5.77-108.0.tar.gz"
+    # Official InterProScan core package + checksum verification.
+    if [[ "$DRY_RUN" -eq 1 || ! -f "$INTERPROSCAN_ARCHIVE" ]]; then
+        download "$INTERPROSCAN_SOFTWARE_BASE/$INTERPROSCAN_ARCHIVE" "$INTERPROSCAN_ARCHIVE"
     fi
-    if [[ "$DRY_RUN" -eq 1 || ! -f interproscan-data-5.77-108.0.tar.gz.md5 ]]; then
-        download_optional "$INTERPRO_BASE/interproscan/5/interproscan-data-5.77-108.0.tar.gz.md5"
+    if [[ "$DRY_RUN" -eq 1 || ! -f "$INTERPROSCAN_MD5_FILE" ]]; then
+        download "$INTERPROSCAN_SOFTWARE_BASE/$INTERPROSCAN_MD5_FILE" "$INTERPROSCAN_MD5_FILE"
+    fi
+
+    verify_md5_checksum_file "$INTERPROSCAN_ARCHIVE" "$INTERPROSCAN_MD5_FILE"
+
+    # Extract exactly as recommended in InterProScan docs (-p preserves permissions).
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        cmd tar -pxvzf "$INTERPROSCAN_ARCHIVE"
+    else
+        if [[ ! -d "interproscan-${INTERPROSCAN_VERSION}" ]]; then
+            tar -pxvzf "$INTERPROSCAN_ARCHIVE"
+        else
+            echo -e "${GREEN}  ✓ Reusing existing interproscan-${INTERPROSCAN_VERSION} directory (extract skipped)${NC}"
+        fi
+    fi
+
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        require_nonempty_file "interproscan-${INTERPROSCAN_VERSION}/interproscan.sh" "InterProScan launcher" || return 1
     fi
 
     echo -e "${GREEN}  ✓ InterPro setup complete${NC}"
@@ -1407,7 +1470,7 @@ is_db_ready_minimal() {
         merops) [[ -f "$DB_DIR/merops/pepunit.lib" && -f "$DB_DIR/merops/merops.dmnd" ]] ;;
         tcdb) [[ -f "$DB_DIR/tcdb/tcdb.fasta" && ( -f "$DB_DIR/tcdb/tcdb_blast.pin" || -f "$DB_DIR/tcdb/tcdb_blast.phr" ) ]] ;;
         uniprot) [[ -f "$DB_DIR/uniprot/uniprot_sprot.fasta" ]] ;;
-        interpro) [[ -f "$DB_DIR/interpro/signature_to_ipr.tsv" || -f "$DB_DIR/interpro/signature_to_ipr.dat" ]] ;;
+        interpro) [[ ( -f "$DB_DIR/interpro/signature_to_ipr.tsv" || -f "$DB_DIR/interpro/signature_to_ipr.dat" ) && -f "$DB_DIR/interpro/interproscan-${INTERPROSCAN_VERSION}/interproscan.sh" ]] ;;
         rasttk) [[ -f "$DB_DIR/rasttk/subsystem_mapping.tsv" && -d "$DB_DIR/rasttk/variant_definitions" ]] ;;
         *) return 1 ;;
     esac
